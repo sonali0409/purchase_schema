@@ -21,7 +21,17 @@ class Settings:
 
     # --- App behavior ---
     MAX_ROWS: int = int(os.getenv("MAX_ROWS", "500"))
+    # Trend questions ("month over month how many PRs were created") that name no
+    # period default to the current financial year rather than scanning all history.
+    # Only trends are defaulted -- point lookups like "details for PO 5400010477"
+    # must stay unfiltered.
+    TREND_DEFAULT_TO_CURRENT_FY: bool = os.getenv("TREND_DEFAULT_TO_CURRENT_FY", "true").lower() == "true"
+    # Year-grain trends are the exception: one FY is a single bucket, so a year-over-year
+    # question inside the current FY has nothing to compare against. Default those to the
+    # last N financial years instead. Set to 1 for strict current-FY-only behaviour.
+    TREND_DEFAULT_FY_SPAN_YEAR_GRAIN: int = int(os.getenv("TREND_DEFAULT_FY_SPAN_YEAR_GRAIN", "3"))
     QUERY_TIMEOUT_SECONDS: int = int(os.getenv("QUERY_TIMEOUT_SECONDS", "30"))
+
 
 
 settings = Settings()
