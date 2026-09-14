@@ -7,6 +7,7 @@ import prestodb
 from typing import Any, List, Literal, Optional,Tuple, Dict
 from dotenv import load_dotenv
 import pandas as pd
+import csv
 load_dotenv()
 
 from config import settings
@@ -53,3 +54,26 @@ def run_query(sql: str, max_rows: int = None) -> Tuple[List[str], List[Dict[str,
         return columns, [dict(zip(columns, row)) for row in rows]
     finally:
         conn.close()
+
+query = """
+SELECT *
+FROM "purchase"."procurement_view"."purchase_unified_testing"
+"""
+
+columns, rows = run_query(query)
+
+df = pd.DataFrame(rows, columns=columns)
+
+df.to_csv(
+    "purchase_unified_testing.csv",
+    index=False,
+    encoding="utf-8-sig",   # UTF-8 with BOM for Excel
+    quoting=csv.QUOTE_ALL,  # Quote all fields to preserve commas/newlines
+    lineterminator="\n"     # Row separator
+)
+
+# Export to Excel
+# df.to_excel("purchase_vendor_budget.xlsx", index=False)
+
+print("Export completed successfully!")
+print(df.head())

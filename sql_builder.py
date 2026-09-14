@@ -218,6 +218,7 @@ Builds Trino/Presto SQL from an ExtractedIntent, resolving:
 from __future__ import annotations
 from typing import NamedTuple, Optional, Tuple, List
 from datetime import date
+import re
 
 import schema as sch
 from models import ExtractedIntent
@@ -234,6 +235,83 @@ EXACT_MATCH_KEYS = {
     "gate_entry_status", "rejected_at_level", "service_entry_sheet", "current_level",
 }
 FUZZY_MATCH_KEYS = {"vendor_name", "material_desc", "requisitioner"}
+
+GROUP_BY_KEY_ALIASES = {
+    "plant wise": "plant",
+    "plant-wise": "plant",
+    "plant": "plant",
+    "department wise": "department",
+    "department-wise": "department",
+    "dept wise": "department",
+    "dept-wise": "department",
+    "department": "department",
+    "material description": "material_desc",
+    "material desc": "material_desc",
+    "material_description": "material_desc",
+    "material_desc": "material_desc",
+    "material": "material_code",
+    "material code": "material_code",
+    "material_code": "material_code",
+    "vendor wise": "vendor_name",
+    "vendor-wise": "vendor_name",
+}
+
+AGGREGATE_COLUMN_ALIASES = {
+    "ME2L": {
+        "amount": "Net_Order_Value",
+        "value": "Net_Order_Value",
+        "net_value": "Net_Order_Value",
+        "net order value": "Net_Order_Value",
+        "net_order_value": "Net_Order_Value",
+        "quantity": "Order_Quantity",
+        "qty": "Order_Quantity",
+        "order quantity": "Order_Quantity",
+        "order_quantity": "Order_Quantity",
+        "price": "PO_Net_Price",
+        "net price": "PO_Net_Price",
+        "po_net_price": "PO_Net_Price",
+    },
+    "PO_release": {
+        "amount": "POR_Amount",
+        "value": "POR_Amount",
+        "por_amount": "POR_Amount",
+        "approval days": "PO_No_Of_Days_Approval",
+        "approval_days": "PO_No_Of_Days_Approval",
+    },
+    "Material_Doc_List": {
+        "amount": "MTLST_Amt_in_Loc_Cur",
+        "value": "MTLST_Amt_in_Loc_Cur",
+        "quantity": "MTLST_Quantity",
+        "qty": "MTLST_Quantity",
+        "grn amount": "GRN_Amount",
+        "grn_amount": "GRN_Amount",
+        "grn quantity": "GRN_qty",
+        "grn_qty": "GRN_qty",
+    },
+    "Vendor_PO_History": {
+        "amount": "GRN_Amount",
+        "value": "GRN_Net_Value",
+        "net value": "GRN_Net_Value",
+        "net_value": "GRN_Net_Value",
+        "gross value": "GRN_Gross_Value",
+        "gross_value": "GRN_Gross_Value",
+        "quantity": "GRN_qty",
+        "qty": "GRN_qty",
+        "delay days": "Material_Delay_Days",
+        "delay_days": "Material_Delay_Days",
+    },
+    "SES": {
+        "amount": "SES_Amount",
+        "value": "SES_Amount",
+        "ses_amount": "SES_Amount",
+    },
+    "Sap_Purchase": {
+        "quantity": "SAP_Quantity_Requested",
+        "qty": "SAP_Quantity_Requested",
+        "requested quantity": "SAP_Quantity_Requested",
+        "ordered quantity": "SAP_Quantity_Ordered",
+    },
+}
 
 # Curated columns shown for row-level ("list") results -- the full 70+ column set per
 # report is available via all_columns_for_report() for anyone building custom SELECTs,
@@ -328,7 +406,40 @@ def _qualified_table() -> str:
     return f'{settings.PRESTO_CATALOG}."{settings.PRESTO_SCHEMA}".{sch.TABLE_NAME}'
 
 
+def _filter_values(value) -> List[str]:
+    if value in (None, ""):
+        return []
+    if isinstance(value, (list, tuple, set)):
+        raw_parts = value
+    else:
+        raw_parts = re.split(r"\s*(?:,|/|\bor\b|\band\b)\s*", str(value), flags=re.IGNORECASE)
+    values = []
+    for part in raw_parts:
+        cleaned = str(part).strip().strip("'\"")
+        if cleaned:
+            values.append(cleaned)
+    return values
+
+
+def _filter_condition(col: str, key: str, value) -> Optional[str]:
+    values = _filter_values(value)
+    if not values:
+        return None
+    if key in FUZZY_MATCH_KEYS:
+        clauses = [
+            f"lower(CAST({col} AS varchar)) LIKE '%{_quote(v.lower())}%'"
+            for v in values
+        ]
+        return clauses[0] if len(clauses) == 1 else f"({' OR '.join(clauses)})"
+
+    quoted_values = ", ".join(f"'{_quote(v.lower())}'" for v in values)
+    if len(values) == 1:
+        return f"lower(CAST({col} AS varchar)) = {quoted_values}"
+    return f"lower(CAST({col} AS varchar)) IN ({quoted_values})"
+
+
 def _resolve_filter_column(report: str, key: str) -> Optional[str]:
+    key = GROUP_BY_KEY_ALIASES.get(str(key).strip().lower(), key)
     col = sch.key_column(report, key)
     if col:
         return col
@@ -341,6 +452,21 @@ def _resolve_filter_column(report: str, key: str) -> Optional[str]:
         return "PO_Plant"
     if key in ("company_code",) and "Company_Code" in sch.COMMON_COLUMNS:
         return "Company_Code"
+    return None
+
+
+def _resolve_aggregate_column(report: str, key: str) -> Optional[str]:
+    if not key:
+        return None
+    normalized_key = str(key).strip()
+    alias = AGGREGATE_COLUMN_ALIASES.get(report, {}).get(normalized_key.lower())
+    if alias:
+        return alias
+    resolved = _resolve_filter_column(report, normalized_key)
+    if resolved:
+        return resolved
+    if normalized_key in sch.all_columns_for_report(report):
+        return normalized_key
     return None
 
 
@@ -387,19 +513,19 @@ def build_where_clause(
     resolve_intent_date_range); pass one explicitly to reuse an already-resolved window."""
     conditions: List[str] = []
     for key, value in (intent.filters or {}).items():
-        if value in (None, ""):
+        values = _filter_values(value)
+        if not values:
             continue
-        normalized_value = str(value).lower()
-        if intent.report == "PR_release" and key == "release_status" and normalized_value == "rejected":
+        normalized_values = [v.lower() for v in values]
+        if intent.report == "PR_release" and key == "release_status" and "rejected" in normalized_values:
             conditions.append("lower(CAST(PR_Rejected AS varchar)) = 'yes'")
             continue
         col = _resolve_filter_column(intent.report, key)
         if not col:
             continue  # this filter concept doesn't apply to the chosen report; skip silently
-        if key in FUZZY_MATCH_KEYS:
-            conditions.append(f"lower(CAST({col} AS varchar)) LIKE '%{_quote(normalized_value)}%'")
-        else:
-            conditions.append(f"lower(CAST({col} AS varchar)) = '{_quote(normalized_value)}'")
+        condition = _filter_condition(col, key, values)
+        if condition:
+            conditions.append(condition)
 
     resolved_range = date_range if date_range is not None else resolve_intent_date_range(intent).range
     if resolved_range:
@@ -445,10 +571,10 @@ def _build_trend_sql(from_sql: str, period_expr: str, metric_expr: str, metric_a
 def build_sql(
     intent: ExtractedIntent,
     date_range: Optional[Tuple[date, date]] = None,
+    extra_group_columns: Optional[List[str]] = None,
 ) -> Tuple[str, Optional[Tuple[date, date]]]:
     if intent.report not in sch.REPORT_NAMES:
         raise ValueError(f"Unknown report: {intent.report}")
-    print(intent)
     table = _qualified_table()
     conditions, resolved_range = build_where_clause(intent, date_range)
     where_sql = f"\nWHERE {' AND '.join(conditions)}" if conditions else ""
@@ -489,18 +615,43 @@ def build_sql(
             )
         distinct_semkey = intent.distinct_key or DEFAULT_DOC_KEY.get(intent.report, "po_number")
         distinct_col = _resolve_filter_column(intent.report, distinct_semkey) or "PO_Number"
-        sql = (f"SELECT {group_col} AS group_value, COUNT(DISTINCT {distinct_col}) AS record_count\n"
-               f"FROM {table}{where_sql}\n"
-               f"GROUP BY {group_col}\nORDER BY record_count DESC")
+        sql = _grouped_count_sql(
+            f"FROM {table}{where_sql}",
+            f"COUNT(DISTINCT {distinct_col})",
+            "record_count",
+            group_col,
+            extra_group_columns,
+        )
 
     elif op == "aggregate":
         if not intent.aggregate_function or not intent.aggregate_column:
             raise ValueError("aggregate requires aggregate_function and aggregate_column")
-        agg_col = _resolve_filter_column(intent.report, intent.aggregate_column) or intent.aggregate_column
+        agg_col = _resolve_aggregate_column(intent.report, intent.aggregate_column)
+        if not agg_col:
+            raise ValueError(
+                f"'{intent.aggregate_column}' is not a recognized aggregate column for "
+                f"report '{intent.report}'"
+            )
         func = intent.aggregate_function.upper()
         if func not in ("SUM", "AVG", "MIN", "MAX"):
             raise ValueError(f"Unsupported aggregate function: {func}")
-        sql = f"SELECT {func}({agg_col}) AS result\nFROM {table}{where_sql}"
+        if intent.group_by_column:
+            group_col = _resolve_filter_column(intent.report, intent.group_by_column)
+            if not group_col:
+                raise ValueError(
+                    f"'{intent.group_by_column}' is not a recognized grouping dimension for "
+                    f"report '{intent.report}'"
+                )
+            group_cols = _combined_group_columns(group_col, extra_group_columns)
+            select_cols = ", ".join(
+                f"{col} AS group_value_{idx}" for idx, col in enumerate(group_cols, start=1)
+            )
+            group_by = ", ".join(group_cols)
+            sql = (f"SELECT {select_cols}, {func}({agg_col}) AS result\n"
+                   f"FROM {table}{where_sql}\n"
+                   f"GROUP BY {group_by}\nORDER BY result DESC")
+        else:
+            sql = f"SELECT {func}({agg_col}) AS result\nFROM {table}{where_sql}"
 
     elif op == "trend":
         if not intent.time_grain:
@@ -513,7 +664,12 @@ def build_sql(
             func = intent.aggregate_function.upper()
             if func not in ("SUM", "AVG", "MIN", "MAX"):
                 raise ValueError(f"Unsupported aggregate function: {func}")
-            agg_col = _resolve_filter_column(intent.report, intent.aggregate_column) or intent.aggregate_column
+            agg_col = _resolve_aggregate_column(intent.report, intent.aggregate_column)
+            if not agg_col:
+                raise ValueError(
+                    f"'{intent.aggregate_column}' is not a recognized aggregate column for "
+                    f"report '{intent.report}'"
+                )
             metric_expr, metric_alias = f"{func}({agg_col})", "metric_value"
         else:
             distinct_semkey = intent.distinct_key or DEFAULT_DOC_KEY.get(intent.report, "po_number")
@@ -597,6 +753,27 @@ _KPI_DATE_REPORT = {
     "delay-in-grn": "Material_Doc_List",
 }
 
+_KPI_DIMENSION_COLUMNS = {
+    "pr-approval-cycle-time": _KPI_PR_RELEASE_DIMS,
+    "pr-release-status": _KPI_PR_RELEASE_DIMS,
+    "pr-pending-for-po": _KPI_PR_RELEASE_DIMS,
+    "pr-rejection": _KPI_PR_RELEASE_DIMS,
+    "pr-created": _KPI_SAP_PURCHASE_DIMS,
+    "pr-po-details": _KPI_ME2L_DIMS,
+    "po-approval-cycle-time": _KPI_PO_RELEASE_DIMS,
+    "po-approval-delay-level-wise": _KPI_PO_RELEASE_DIMS,
+    "po-pending": _KPI_MATDOC_DIMS,
+    "po-release": _KPI_MATDOC_DIMS,
+    "po-status-grn": _KPI_MATDOC_DIMS,
+    "material-po-delay": _KPI_MATDOC_DIMS,
+    "vendor-wise-po": _KPI_ME2L_DIMS,
+    "material-wise-vendor": _KPI_ME2L_DIMS,
+    "delay-in-grn": _KPI_MATDOC_DIMS,
+    "gate-entry-daily": _KPI_GATEENTRY_DIMS,
+    "gate-entry-with-po": _KPI_GATEENTRY_DIMS,
+    "gate-entry-without-po": _KPI_GATEENTRY_DIMS,
+}
+
 _KPI_DISTINCT_KEY_COLUMNS = {
     "pr_number": "PR_Number",
     "po_number": "PO_Number",
@@ -616,12 +793,15 @@ def _kpi_date_condition(date_col: str, date_range: Optional[Tuple[date, date]]) 
 def _kpi_dim_conditions(filters: dict, colmap: dict) -> List[str]:
     conds = []
     for key, value in (filters or {}).items():
-        if value in (None, ""):
+        values = _filter_values(value)
+        if not values:
             continue
         col = colmap.get(key)
         if not col:
             continue
-        conds.append(f"lower(CAST({col} AS varchar)) = '{_quote(str(value).lower())}'")
+        condition = _filter_condition(col, key, values)
+        if condition:
+            conds.append(condition)
     return conds
 
 
@@ -883,11 +1063,38 @@ UNSUPPORTED_KPIS = {
 }
 
 
+def _combined_group_columns(primary_group_col: Optional[str], extra_group_cols: Optional[List[str]] = None) -> List[str]:
+    group_cols = []
+    for col in [primary_group_col] + (extra_group_cols or []):
+        if col and col not in group_cols:
+            group_cols.append(col)
+    return group_cols
+
+
+def _grouped_count_sql(
+    from_sql: str,
+    select_expr: str,
+    alias: str,
+    primary_group_col: Optional[str],
+    extra_group_cols: Optional[List[str]] = None,
+) -> str:
+    group_cols = _combined_group_columns(primary_group_col, extra_group_cols)
+    if not group_cols:
+        return f"SELECT {select_expr} AS {alias}\n{from_sql}"
+    select_cols = ", ".join(f"{col} AS group_value_{idx}" for idx, col in enumerate(group_cols, start=1))
+    group_by = ", ".join(group_cols)
+    return (f"SELECT {select_cols}, {select_expr} AS {alias}\n"
+            f"{from_sql}\n"
+            f"GROUP BY {group_by}\nORDER BY {alias} DESC")
+
+
 def _kpi_count_sql(
     kpi_id: str,
     detail_sql: str,
     operation: str,
     distinct_key: Optional[str],
+    group_by_column: Optional[str] = None,
+    extra_group_columns: Optional[List[str]] = None,
 ) -> str:
     if operation not in ("count", "count_distinct"):
         return detail_sql
@@ -904,8 +1111,23 @@ def _kpi_count_sql(
         alias = "record_count"
 
     from_sql = _kpi_from_sql(kpi_id, detail_sql)
+    group_col = _kpi_group_column(kpi_id, group_by_column) if group_by_column else None
+    return _grouped_count_sql(from_sql, select_expr, alias, group_col, extra_group_columns)
 
-    return f"SELECT {select_expr} AS {alias}\n{from_sql}"
+
+def _kpi_group_column(kpi_id: str, group_by_column: str) -> str:
+    normalized_key = GROUP_BY_KEY_ALIASES.get(str(group_by_column).strip().lower(), group_by_column)
+    colmap = _KPI_DIMENSION_COLUMNS.get(kpi_id, {})
+    group_col = colmap.get(normalized_key)
+    if not group_col:
+        report = KPI_REGISTRY.get(kpi_id, (None,))[0]
+        if report:
+            group_col = _resolve_filter_column(report, normalized_key)
+    if not group_col:
+        raise ValueError(
+            f"'{group_by_column}' is not a recognized grouping dimension for KPI '{kpi_id}'"
+        )
+    return group_col
 
 
 def _kpi_from_sql(kpi_id: str, detail_sql: str) -> str:
@@ -955,6 +1177,8 @@ def build_kpi_sql(
     operation: str = "list",
     distinct_key: Optional[str] = None,
     time_grain: Optional[str] = None,
+    group_by_column: Optional[str] = None,
+    extra_group_columns: Optional[List[str]] = None,
 ) -> str:
     if kpi_id in UNSUPPORTED_KPIS:
         raise ValueError(UNSUPPORTED_KPIS[kpi_id])
@@ -964,4 +1188,11 @@ def build_kpi_sql(
     detail_sql = builder_fn(filters, date_range)
     if operation == "trend":
         return _kpi_trend_sql(kpi_id, report, detail_sql, time_grain, distinct_key)
-    return _kpi_count_sql(kpi_id, detail_sql, operation, distinct_key)
+    return _kpi_count_sql(
+        kpi_id,
+        detail_sql,
+        operation,
+        distinct_key,
+        group_by_column,
+        extra_group_columns,
+    )

@@ -938,8 +938,10 @@ def _build_system_prompt() -> str:
         "distinct POs) -- but if the user explicitly says something like 'display all POs, not "
         "only distinct ones', use operation='list'.\n"
         "- Use operation=group_by_count with group_by_column set for '<dimension> wise' or "
-        "'breakdown by <dimension>' questions (e.g. 'department wise count of POs' -> "
-        "group_by_column='department').\n"
+        "'breakdown by <dimension>' count questions (e.g. 'department wise count of POs' -> "
+        "group_by_column='department'). For aggregate questions with a grouping dimension "
+        "(e.g. 'plant-wise total PO value', 'sum amount by material description'), use "
+        "operation='aggregate' and set group_by_column to the dimension.\n"
         "- Use operation=trend with time_grain set for 'month on month', 'quarter on quarter', "
         "'year on year' questions.\n"
         "- 'month on month'/'mom'/'monthly', 'quarter on quarter'/'qoq'/'quarterly', 'year on "
@@ -950,10 +952,12 @@ def _build_system_prompt() -> str:
         "date_phrase='last fy'. A trend with no period stated defaults to the current financial "
         "year downstream, so you do not need to invent one.\n"
         "- filters is a dict of semantic_key -> value using ONLY these semantic keys where "
-        "applicable: po_number, pr_number, plant, company_code, vendor_name, material_desc, "
+        "applicable: po_number, pr_number, plant, company_code, vendor_name,name_of_supplier ,material_desc, "
         "material_code, department, release_status, gate_entry_status, rejected_at_level, "
         "requisitioner, service_entry_sheet, current_level. Only include keys the question "
-        "actually specifies.\n"
+        "actually specifies. If the user gives multiple values for one filter using commas, "
+        "'and', or 'or' (e.g. 'sales and admin department', 'PO 5400010477 and 5400010478'), "
+        "set that filter value to an array of strings, not one comma-joined string.\n"
         "- material_desc / vendor_name filters should carry the raw search text (e.g. 'air "
         "cooler', 'Brilliance sales') -- these will be matched with case-insensitive partial "
         "matching downstream, do not guess exact codes.\n"
@@ -1055,7 +1059,10 @@ _TOOL_SCHEMA = {
                 "filters": {
                     "type": "object",
                     "additionalProperties": {
-                        "type": "string"
+                        "oneOf": [
+                            {"type": "string"},
+                            {"type": "array", "items": {"type": "string"}}
+                        ]
                     }
                 },
                 "date_phrase": {
@@ -1237,8 +1244,8 @@ _KPI_PHRASE_RULES = (
     # ------------------------------------------------------------------
     (
         re.compile(
-            r"\bpo(?:s)?\b.*\bpending\b"
-            r"|\bpending\b.*\bpo(?:s)?\b",
+            r"\bpo(?:s)?\b.*\b(?:pending|unrelease(?:d)?|not\s+released)\b"
+            r"|\b(?:pending|unrelease(?:d)?|not\s+released)\b.*\bpo(?:s)?\b",
             re.IGNORECASE,
         ),
         "po-pending",
@@ -1340,8 +1347,9 @@ _KPI_PHRASE_RULES = (
     # ------------------------------------------------------------------
     (
         re.compile(
-            r"\bdelay\b.*\bgrn\b"
-            r"|\bgrn\b.*\bdelay\b",
+            r"\b(?:delay|late|pending)\b.*\b(?:grn|goods?\s+received|goods?\s+receipt(?:\s+note)?)\b"
+            r"|"
+            r"\b(?:grn|goods?\s+received|goods?\s+receipt(?:\s+note)?)\b.*\b(?:delay|late|pending)\b",
             re.IGNORECASE,
         ),
         "delay-in-grn",
@@ -1416,6 +1424,68 @@ _TREND_PHRASE_RULES = (
 )
 
 
+_GROUP_BY_PHRASE_RULES = (
+    (
+        re.compile(
+            r"\b(?:plant\s*[-\s]?wise|by\s+plant|per\s+plant|plant\s+breakdown)\b",
+            re.IGNORECASE,
+        ),
+        "plant",
+    ),
+    (
+        re.compile(
+            r"\b(?:department\s*[-\s]?wise|dept\s*[-\s]?wise|by\s+department|"
+            r"by\s+dept|per\s+department|department\s+breakdown)\b",
+            re.IGNORECASE,
+        ),
+        "department",
+    ),
+    (
+        re.compile(
+            r"\b(?:material\s+description\s*[-\s]?wise|material\s+desc\s*[-\s]?wise|"
+            r"by\s+material\s+description|by\s+material\s+desc|per\s+material\s+description|"
+            r"material\s+description\s+breakdown)\b",
+            re.IGNORECASE,
+        ),
+        "material_desc",
+    ),
+    (
+        re.compile(
+            r"\b(?:material\s*[-\s]?wise|by\s+material|per\s+material|material\s+breakdown)\b",
+            re.IGNORECASE,
+        ),
+        "material_code",
+    ),
+    (
+            re.compile(
+                r"\b(?:vendor\s*[-\s]?wise|by\s+vendor|per\s+vendor|vendor\s+breakdown)\b",
+                re.IGNORECASE,
+            ),
+            "vendor_name",
+        ),
+)
+
+_GROUP_BY_KEY_ALIASES = {
+    "plant wise": "plant",
+    "plant-wise": "plant",
+    "plant": "plant",
+    "department wise": "department",
+    "department-wise": "department",
+    "dept wise": "department",
+    "dept-wise": "department",
+    "department": "department",
+    "material description": "material_desc",
+    "material desc": "material_desc",
+    "material_description": "material_desc",
+    "material_desc": "material_desc",
+    "material": "material_code",
+    "material code": "material_code",
+    "material_code": "material_code",
+    "vendor wise": "vendor_name",
+    "vendor-wise": "vendor_name",
+}
+
+
 # A grain is not a period. The model reliably copies spelled-out grain wording
 # ("quarter on quarter", "year on year") into date_phrase, where the date resolver
 # rightly rejects it -- "Unrecognized date phrase: 'quarter on quarter'". Strip the grain
@@ -1451,6 +1521,7 @@ def _sanitize_date_phrase(date_phrase: Optional[str]) -> Optional[str]:
 
 _KPI_DEFAULT_DISTINCT_KEYS = {
     "pr-pending-for-po": "pr_number",
+    "pr-release-status": "pr_number",
     "pr-rejection": "pr_number",
     "po-pending": "po_number",
     "po-release": "po_number",
@@ -1470,6 +1541,29 @@ def _apply_deterministic_overrides(question: str, intent: ExtractedIntent) -> Ex
         if pattern.search(question):
             requested_time_grain = time_grain
             break
+
+    requested_group_by = None
+    for pattern, group_by_column in _GROUP_BY_PHRASE_RULES:
+        if pattern.search(question):
+            requested_group_by = group_by_column
+            break
+
+    current_group_by = intent.group_by_column
+    if current_group_by:
+        normalized_group_by = _GROUP_BY_KEY_ALIASES.get(str(current_group_by).strip().lower())
+        if normalized_group_by and normalized_group_by != current_group_by:
+            updates["group_by_column"] = normalized_group_by
+            current_group_by = normalized_group_by
+    if requested_group_by and not current_group_by:
+        updates["group_by_column"] = requested_group_by
+        current_group_by = requested_group_by
+    if (
+        current_group_by
+        and intent.operation == "group_by_count"
+        and intent.aggregate_function
+        and intent.aggregate_column
+    ):
+        updates["operation"] = "aggregate"
     
     # for pattern, date_phrase in _DATE_PHRASE_ALIASES:
     #     if pattern.search(question):
@@ -1532,7 +1626,7 @@ def _apply_deterministic_overrides(question: str, intent: ExtractedIntent) -> Ex
         if requested_time_grain:
             operation = "trend"
             distinct_key = distinct_key or _KPI_DEFAULT_DISTINCT_KEYS.get(matched_kpi)
-        elif _COUNT_PHRASE_RE.search(question):
+        elif _COUNT_PHRASE_RE.search(question) or current_group_by:
             operation = "count_distinct"
             distinct_key = distinct_key or _KPI_DEFAULT_DISTINCT_KEYS.get(matched_kpi)
         elif operation not in ("count", "count_distinct"):
@@ -1544,7 +1638,7 @@ def _apply_deterministic_overrides(question: str, intent: ExtractedIntent) -> Ex
                 "operation": operation,
                 "aggregate_function": None,
                 "aggregate_column": None,
-                "group_by_column": None,
+                "group_by_column": current_group_by,
                 "time_grain": requested_time_grain if operation == "trend" else None,
                 "distinct_key": distinct_key if operation in ("count", "count_distinct", "trend") else None,
             }

@@ -800,10 +800,10 @@ KEY_COLUMNS = {
     },
 
     'Material_Doc_List': {
-        'material_code': 'PO_Material',
-        'plant': 'PO_Plant',
-        'po_number': 'ME2L_Purchasing_Document',
-        'vendor_name': 'Name_of_Supplier'
+        'material_code': 'MTLST_Material',
+        'plant': 'MTLST_Plant',
+        'po_number': 'MTLST_Purchase_Order',
+        'vendor_name': 'MTLST_Supplier'
     },
 
     'PO_release': {

@@ -119,7 +119,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import schema as sch
 from models import ChatRequest, ChatResponse
 from intent_extractor import extract_intent
-from sql_builder import build_sql, build_kpi_sql, resolve_intent_date_range
+from sql_builder import build_sql, build_kpi_sql, resolve_intent_date_range, _filter_values, _resolve_filter_column
 from presto_connection import run_query
 from config import settings
 
@@ -140,6 +140,19 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+def _separate_filter_group_columns(question: str, intent) -> list:
+    if "separately" not in question.lower():
+        return []
+    cols = []
+    for key, value in (intent.filters or {}).items():
+        if len(_filter_values(value)) < 2:
+            continue
+        col = _resolve_filter_column(intent.report, key)
+        if col and col not in cols:
+            cols.append(col)
+    return cols
 
 
 @app.get("/health")
@@ -197,10 +210,16 @@ def chat(req: ChatRequest):
                 operation=intent.operation,
                 distinct_key=intent.distinct_key,
                 time_grain=intent.time_grain,
+                group_by_column=intent.group_by_column,
+                extra_group_columns=_separate_filter_group_columns(question, intent),
             )
             resolved_range = date_info.range
         else:
-            sql, resolved_range = build_sql(intent, date_range=date_info.range)
+            sql, resolved_range = build_sql(
+                intent,
+                date_range=date_info.range,
+                extra_group_columns=_separate_filter_group_columns(question, intent),
+            )
     except Exception as e:
         logger.exception("SQL build failed")
         return ChatResponse(
