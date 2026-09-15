@@ -421,10 +421,73 @@ def _filter_values(value) -> List[str]:
     return values
 
 
-def _filter_condition(col: str, key: str, value) -> Optional[str]:
+# PR2PO-only: semantic filter keys the generic KEY_COLUMNS map doesn't carry for this
+# report, but that its own filter descriptions (GRN received/quantity, conversion time,
+# release status, rejected PRs) promise. Kept separate from KEY_COLUMNS so no other
+# report's column resolution is affected.
+_PR2PO_EXTRA_FILTER_COLUMNS = {
+    "grn_quantity": "P2P_GRN_Quantity",
+    "grn_flag": "P2P_GRN_Quantity",
+    "grn_received": "P2P_GRN_Quantity",
+    "release_status": "PR_Release_Status",
+    "pr_release_status": "PR_Release_Status",
+    "po_release_status": "PO_Release_Status",
+    "rejected": "P2P_PO_Rejection_Text",
+    "po_rejection": "P2P_PO_Rejection_Text",
+    "conversion_days": "PR_To_PO_Days",
+    "pr_to_po_days": "PR_To_PO_Days",
+    "material_group": "P2P_Material_Group",
+    "purchasing_group": "P2P_Purchasing_Group",
+    "purch_group": "P2P_Purchasing_Group",
+}
+
+# PR2PO-only: recognize a leading comparison operator on a filter value (e.g. "= 0",
+# "< 5", ">=2") instead of always treating it as an exact/fuzzy text match.
+_COMPARISON_OP_RE = re.compile(r"^\s*(<=|>=|!=|<>|=|<|>)\s*(.+)$")
+
+# PR2PO-only: numeric-valued columns that are stored as VARCHAR in the underlying view,
+# so a magnitude comparison (>, <, >=, <=) against a bare numeric literal needs an
+# explicit cast -- Presto/Trino won't implicitly compare varchar to integer.
+_PR2PO_NUMERIC_COMPARISON_COLUMNS = {"P2P_GRN_Quantity", "PR_To_PO_Days"}
+_PR2PO_MAGNITUDE_OPS = {"<", ">", "<=", ">=", "=", "<>"}
+
+
+def _pr2po_agg_column_expr(report: str, agg_col: str) -> str:
+    """PR2PO-only: AVG/SUM/MIN/MAX over a numeric-but-VARCHAR column (same set as
+    _PR2PO_NUMERIC_COMPARISON_COLUMNS) needs an explicit cast, or Presto/Trino rejects
+    the aggregate with 'Unexpected parameters (varchar)'."""
+    if report == "PR2PO" and agg_col in _PR2PO_NUMERIC_COMPARISON_COLUMNS:
+        return f"TRY_CAST({agg_col} AS INT)"
+    return agg_col
+
+
+def _filter_condition(col: str, key: str, value, report: Optional[str] = None) -> Optional[str]:
     values = _filter_values(value)
     if not values:
         return None
+
+    if report == "PR2PO" and len(values) == 1:
+        match = _COMPARISON_OP_RE.match(str(values[0]))
+        if match:
+            op, raw_operand = match.groups()
+            operand = raw_operand.strip()
+            sql_op = "<>" if op == "!=" else op
+            try:
+                float(operand)
+                operand_sql = operand
+                is_numeric = True
+            except ValueError:
+                operand_sql = f"'{_quote(operand)}'"
+                is_numeric = False
+            col_sql = col
+            if (
+                is_numeric
+                and sql_op in _PR2PO_MAGNITUDE_OPS
+                and col in _PR2PO_NUMERIC_COMPARISON_COLUMNS
+            ):
+                col_sql = f"TRY_CAST({col} AS INT)"
+            return f"{col_sql} {sql_op} {operand_sql}"
+
     if key in FUZZY_MATCH_KEYS:
         clauses = [
             f"lower(CAST({col} AS varchar)) LIKE '%{_quote(v.lower())}%'"
@@ -443,6 +506,10 @@ def _resolve_filter_column(report: str, key: str) -> Optional[str]:
     col = sch.key_column(report, key)
     if col:
         return col
+    if report == "PR2PO":
+        extra = _PR2PO_EXTRA_FILTER_COLUMNS.get(str(key).strip().lower())
+        if extra:
+            return extra
     # fall back to a common column with the same name if it happens to exist there
     if key in ("po_number",) and "PO_Number" in sch.COMMON_COLUMNS:
         return "PO_Number"
@@ -453,6 +520,23 @@ def _resolve_filter_column(report: str, key: str) -> Optional[str]:
     if key in ("company_code",) and "Company_Code" in sch.COMMON_COLUMNS:
         return "Company_Code"
     return None
+
+
+# PR2PO-only: intent_extractor.py tags a PR2PO date question with which of PR2PO's three
+# date columns it actually means (intent.date_type). Every other report keeps using
+# schema.py's single DATE_FILTER_COLUMN entry, untouched.
+_PR2PO_DATE_TYPE_COLUMNS = {
+    "created": "P2P_Created_On",
+    "delivery": "P2P_Delivery_Date",
+    "modified": "P2P_Last_Changed_On",
+}
+
+
+def _pr2po_date_filter_column(intent: ExtractedIntent) -> str:
+    if intent.report == "PR2PO":
+        date_type = getattr(intent, "date_type", None)
+        return _PR2PO_DATE_TYPE_COLUMNS.get(date_type, sch.date_filter_column("PR2PO"))
+    return sch.date_filter_column(intent.report)
 
 
 def _resolve_aggregate_column(report: str, key: str) -> Optional[str]:
@@ -523,13 +607,13 @@ def build_where_clause(
         col = _resolve_filter_column(intent.report, key)
         if not col:
             continue  # this filter concept doesn't apply to the chosen report; skip silently
-        condition = _filter_condition(col, key, values)
+        condition = _filter_condition(col, key, values, report=intent.report)
         if condition:
             conditions.append(condition)
 
     resolved_range = date_range if date_range is not None else resolve_intent_date_range(intent).range
     if resolved_range:
-        date_col = sch.date_filter_column(intent.report)
+        date_col = _pr2po_date_filter_column(intent)
         start, end = resolved_range
         conditions.append(
             f"TRY(date_parse(CAST({date_col} AS VARCHAR), '%Y%m%d')) BETWEEN DATE '{start.isoformat()}' "
@@ -579,6 +663,16 @@ def build_sql(
     conditions, resolved_range = build_where_clause(intent, date_range)
     where_sql = f"\nWHERE {' AND '.join(conditions)}" if conditions else ""
     op = intent.operation
+
+    # PR2PO-only: the model sometimes classifies a grouped question ("PR count by
+    # plant", "PRs converted to orders by plant") as a plain "count" or "count_distinct"
+    # while still correctly populating group_by_column. Neither op applies GROUP BY on
+    # its own, so without this the query silently collapses into a single ungrouped
+    # total. Route both through the same "group_by_count" branch used when the model
+    # gets the operation right -- that branch already does COUNT(DISTINCT ...), so it
+    # covers "count_distinct" correctly too, not just "count".
+    if op in ("count", "count_distinct") and intent.report == "PR2PO" and intent.group_by_column:
+        op = "group_by_count"
 
     if op == "count":
         sql = f"SELECT COUNT(*) AS record_count\nFROM {table}{where_sql}"
@@ -635,6 +729,7 @@ def build_sql(
         func = intent.aggregate_function.upper()
         if func not in ("SUM", "AVG", "MIN", "MAX"):
             raise ValueError(f"Unsupported aggregate function: {func}")
+        agg_col_expr = _pr2po_agg_column_expr(intent.report, agg_col)
         if intent.group_by_column:
             group_col = _resolve_filter_column(intent.report, intent.group_by_column)
             if not group_col:
@@ -647,11 +742,11 @@ def build_sql(
                 f"{col} AS group_value_{idx}" for idx, col in enumerate(group_cols, start=1)
             )
             group_by = ", ".join(group_cols)
-            sql = (f"SELECT {select_cols}, {func}({agg_col}) AS result\n"
+            sql = (f"SELECT {select_cols}, {func}({agg_col_expr}) AS result\n"
                    f"FROM {table}{where_sql}\n"
                    f"GROUP BY {group_by}\nORDER BY result DESC")
         else:
-            sql = f"SELECT {func}({agg_col}) AS result\nFROM {table}{where_sql}"
+            sql = f"SELECT {func}({agg_col_expr}) AS result\nFROM {table}{where_sql}"
 
     elif op == "trend":
         if not intent.time_grain:
@@ -670,7 +765,8 @@ def build_sql(
                     f"'{intent.aggregate_column}' is not a recognized aggregate column for "
                     f"report '{intent.report}'"
                 )
-            metric_expr, metric_alias = f"{func}({agg_col})", "metric_value"
+            agg_col_expr = _pr2po_agg_column_expr(intent.report, agg_col)
+            metric_expr, metric_alias = f"{func}({agg_col_expr})", "metric_value"
         else:
             distinct_semkey = intent.distinct_key or DEFAULT_DOC_KEY.get(intent.report, "po_number")
             distinct_col = _resolve_filter_column(intent.report, distinct_semkey) or "PO_Number"

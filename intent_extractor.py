@@ -900,9 +900,23 @@ _REPORT_DESCRIPTIONS = {
     "Sap_Purchase": "Raw SAP purchase requisition data: requisitioner, PR processing status, "
                     "release info, org/plant/department. Use for 'who raised PR X', 'requisitioner "
                     "for PR', 'how many PR raised by <person>'.",
-    "PR2PO": "PR-to-PO conversion tracking (P2P_ prefix): links PR to resulting PO, PR-to-PO days, "
-             "GRN quantity/flag. Use for 'PR to PO details', 'PR pending for PO', 'PO generated "
-             "against PR X'.",
+    "PR2PO": "PR-to-PO conversion tracking (P2P_ prefix): links purchase requisitions to resulting "
+            "purchase orders, tracks GRN (goods receipt) quantity/flag, PR-to-PO days, conversion "
+            "time/metrics, PR release status, rejected PRs. Use for questions about requisitions "
+            "that became orders, purchase order generation from requisitions, and conversion "
+            "timelines -- even when phrased generically without the words 'PR2PO' or 'P2P': "
+            "'GRN received', 'GRN quantity', 'goods received', 'material received', 'PR to PO "
+            "details', 'PR pending for PO', 'pending orders from PRs', 'pending purchase orders', "
+            "'PO generated against PR X', 'purchase order from requisition', 'order generated from "
+            "PR', 'requisition converted to purchase order', 'requisition to order', 'PR to PO "
+            "conversion', 'purchase requisition to order', 'PR to order', 'requisition details' / "
+            "'purchase requisition details' about conversion into an order, 'order details in "
+            "PR2PO', 'PR2PO details', 'requisitions with orders', 'requisitions that became "
+            "orders', 'requisition status' relative to the resulting order, 'requisition creation' "
+            "when the question is about the order that resulted from it, 'conversion time', "
+            "'conversion metrics', 'PR conversion', 'average conversion days', and 'orders "
+            "created'/'count of orders' style questions that also name a PR/requisition or GRN "
+            "context rather than a plain PO document.",
     "GateEntry": "Gate entry / weighbridge records (GTENTRY_ prefix): vehicle, driver, challan, "
                 "gate in/out times, linked PO/material. Use for 'gate entries with/without PO', "
                 "'gate entry status for PO'.",
@@ -951,6 +965,15 @@ def _build_system_prompt() -> str:
         "period as well: 'quarter on quarter for last fy' -> time_grain='quarter', "
         "date_phrase='last fy'. A trend with no period stated defaults to the current financial "
         "year downstream, so you do not need to invent one.\n"
+        "- PR2PO ONLY -- GRN (Goods Receipt Note) keywords: 'GRN received', 'GRN done', "
+        "'goods receipt received', 'material received', 'orders with GRN' all mean the PR2PO "
+        "row has a recorded goods receipt -- set filters={'grn_quantity': '> 0'}. Conversely "
+        "'GRN not received', 'no GRN', 'pending GRN', 'GRN pending' mean set "
+        "filters={'grn_quantity': '= 0'}. If the user states an explicit GRN quantity "
+        "comparison instead (e.g. 'GRN quantity less than 5', 'GRN quantity < 5'), set "
+        "filters={'grn_quantity': '< 5'} using the operator and number given, not '> 0'. These "
+        "GRN examples (grn_quantity as a semantic key with a comparison-operator value) apply "
+        "ONLY to the PR2PO report -- do not use grn_quantity for any other report.\n"
         "- filters is a dict of semantic_key -> value using ONLY these semantic keys where "
         "applicable: po_number, pr_number, plant, company_code, vendor_name,name_of_supplier ,material_desc, "
         "material_code, department, release_status, gate_entry_status, rejected_at_level, "
@@ -1465,6 +1488,225 @@ _GROUP_BY_PHRASE_RULES = (
         ),
 )
 
+# PR2PO-only recall safety net: the model sometimes drops the comparison operator off a
+# numeric filter (e.g. "quantity < 5" -> filters={"grn_quantity": "5"}), silently turning
+# a "less than 5" question into an exact-match-on-5 one. This spots an explicit
+# "<keyword> <op> <number>" phrase in the raw question and, for PR2PO only, makes sure the
+# operator survives into intent.filters as e.g. "< 5" -- sql_builder.py's PR2PO comparison
+# handling (see _COMPARISON_OP_RE) then turns that into a real numeric WHERE condition.
+_PR2PO_COMPARISON_PHRASE_RULES = (
+    (
+        re.compile(
+            r"\b(?:grn\s*quantity|grn\s*qty|quantity|qty)\b\s*"
+            r"(<=|>=|!=|<>|=|<|>)\s*(\d+(?:\.\d+)?)",
+            re.IGNORECASE,
+        ),
+        "grn_quantity",
+    ),
+    (
+        re.compile(
+            r"\b(?:pr[\s\-]?to[\s\-]?po\s*days|conversion\s*days|conversion\s*time|days)\b\s*"
+            r"(<=|>=|!=|<>|=|<|>)\s*(\d+(?:\.\d+)?)",
+            re.IGNORECASE,
+        ),
+        "conversion_days",
+    ),
+)
+
+
+_COMPARISON_VALUE_ALREADY_HAS_OP_RE = re.compile(r"^\s*(<=|>=|!=|<>|=|<|>)")
+
+
+# PR2PO-only: which of PR2PO's three date columns (P2P_Created_On / P2P_Delivery_Date /
+# P2P_Last_Changed_On) a date question is actually about. Order matters -- "delivery" and
+# "modified" are checked before the "created" fallback since a phrase naming one of them
+# should never be mistaken for the default. Falls back to "created" when nothing matches,
+# matching schema.py's existing default date-filter column for PR2PO.
+_PR2PO_DATE_TYPE_PHRASE_RULES = (
+    (
+        re.compile(
+            r"\b(?:delivery\s*date|received\s*date|receipt\s*date|delivery)\b",
+            re.IGNORECASE,
+        ),
+        "delivery",
+    ),
+    (
+        re.compile(
+            r"\b(?:last\s*(?:changed|modified)|date\s*modified|modified|changed)\b",
+            re.IGNORECASE,
+        ),
+        "modified",
+    ),
+    (
+        re.compile(r"\b(?:created\s*on|creation|created)\b", re.IGNORECASE),
+        "created",
+    ),
+)
+
+
+# PR2PO-only grouping overrides. PR2PO has no material_code column (only
+# P2P_Material_Group), so "material wise" needs to resolve to "material_group" instead
+# of the generic _GROUP_BY_PHRASE_RULES default of "material_code" -- and PR2PO also
+# supports a "purchasing group" dimension the generic rules above don't cover at all.
+_PR2PO_GROUP_BY_PHRASE_RULES = (
+    (
+        re.compile(
+            r"\b(?:purchasing\s*group\s*[-\s]?wise|by\s+purchasing\s+group|"
+            r"per\s+purchasing\s+group|purchasing\s+group\s+breakdown|"
+            r"purch\s*group\s*[-\s]?wise|by\s+purch\s+group|per\s+purch\s+group|"
+            r"purchasing\s+group|purch\s+group)\b",
+            re.IGNORECASE,
+        ),
+        "purchasing_group",
+    ),
+    (
+        re.compile(
+            r"\b(?:material\s+group\s*[-\s]?wise|by\s+material\s+group|"
+            r"per\s+material\s+group|material\s+group\s+breakdown|material\s+group)\b",
+            re.IGNORECASE,
+        ),
+        "material_group",
+    ),
+)
+
+
+# PR2PO-only: generic structural words that show up describing a dimension in the
+# question (e.g. "plant location", "vendor name", "material group wise") but that the
+# model sometimes mistakes for an actual filter VALUE of that dimension. Used only to
+# reject a candidate filter value, never to reject a filter key.
+_PR2PO_HALLUCINATION_BLOCKLIST = {
+    "location", "wise", "group", "status", "type", "name", "code", "level",
+    "number", "value", "details", "detail", "breakdown", "distribution",
+}
+
+
+def _validate_pr2po_filters(question: str, filters: dict) -> dict:
+    """PR2PO-only recall/precision guard (see FIX #7): drop any filter whose value the
+    model appears to have invented rather than read off the question -- either the value
+    never appears in the question at all (e.g. a PO number nobody mentioned), or it's
+    just a generic structural word (e.g. "location" out of "plant location") describing
+    the dimension rather than naming an actual value for it. Filters that ARE mentioned
+    are always kept, comparison operators (FIX #3/#5) included -- only the operand after
+    the operator is checked against the question."""
+    if not filters:
+        return filters
+    q_lower = question.lower()
+    validated = {}
+    for key, value in filters.items():
+        if value in (None, ""):
+            continue
+        text = str(value).strip()
+        op_match = _COMPARISON_VALUE_ALREADY_HAS_OP_RE.match(text)
+        operand = text[op_match.end():].strip() if op_match else text
+        if not operand:
+            continue
+        operand_lower = operand.lower()
+        if operand_lower in _PR2PO_HALLUCINATION_BLOCKLIST:
+            continue
+        if re.search(r"[^a-z]", operand_lower):
+            # contains digits/punctuation/spaces (a code, a number, or multi-word free
+            # text like a vendor name) -- require the exact operand text in the question.
+            found = operand_lower in q_lower
+        else:
+            # a single alphabetic word -- require it as a standalone token, not merely a
+            # substring caught inside a longer, unrelated word.
+            found = re.search(r"\b" + re.escape(operand_lower) + r"\b", q_lower) is not None
+        if found:
+            validated[key] = value
+    return validated
+
+
+# PR2PO-only (FIX #8): a filter value's own dimension name, or a generic label like
+# "status"/"code", often rides along in the user's wording ("F & A department",
+# "Vendor Code 001") but isn't part of what's actually stored in the column. Trimmed
+# only from the front or back of the value, in order, and never down to nothing --
+# the middle of a value (e.g. the "&" in "F & A") is never touched.
+_PR2PO_FILTER_VALUE_DESCRIPTORS = {
+    "department", "group", "code", "status", "name", "type", "level", "category",
+}
+
+_PR2PO_FILTER_KEY_WORDS = {
+    "department": {"department"},
+    "vendor_name": {"vendor", "name"},
+    "plant": {"plant"},
+    "material_desc": {"material", "description", "desc"},
+    "material_group": {"material", "group"},
+    "purchasing_group": {"purchasing", "group"},
+    "po_number": {"po", "number"},
+    "pr_number": {"pr", "number"},
+}
+
+
+def _normalize_pr2po_filter_values(filters: dict) -> dict:
+    """PR2PO-only: strip a leading/trailing descriptor word off each filter value --
+    run after _validate_pr2po_filters so hallucinated filters are already gone and only
+    real, but over-worded, values are being cleaned."""
+    normalized = {}
+    for key, value in (filters or {}).items():
+        if isinstance(value, str) and value.strip():
+            descriptors = _PR2PO_FILTER_VALUE_DESCRIPTORS | _PR2PO_FILTER_KEY_WORDS.get(key, set())
+            tokens = value.split()
+            start = 0
+            while start < len(tokens) - 1 and re.sub(r"[^\w&]", "", tokens[start]).lower() in descriptors:
+                start += 1
+            end = len(tokens)
+            while end > start + 1 and re.sub(r"[^\w&]", "", tokens[end - 1]).lower() in descriptors:
+                end -= 1
+            cleaned = " ".join(tokens[start:end]).strip()
+            normalized[key] = cleaned if cleaned else value
+        else:
+            normalized[key] = value
+    return normalized
+
+
+# PR2PO-only (FIX #9): recall safety net for "average conversion time by vendor"-style
+# questions where the model recognizes operation="aggregate" but leaves
+# aggregate_function/aggregate_column null. Keyword -> (function, column); checked in
+# this order so a more specific word never loses to a less specific one appearing later
+# in the same question.
+_PR2PO_AGGREGATE_KEYWORDS = (
+    (re.compile(r"\b(?:average|avg)\b", re.IGNORECASE), ("AVG", "PR_To_PO_Days")),
+    (re.compile(r"\b(?:sum|total)\b", re.IGNORECASE), ("SUM", "P2P_GRN_Quantity")),
+    (re.compile(r"\b(?:minimum|min)\b", re.IGNORECASE), ("MIN", "PR_To_PO_Days")),
+    (re.compile(r"\b(?:maximum|max)\b", re.IGNORECASE), ("MAX", "PR_To_PO_Days")),
+)
+
+
+def _detect_pr2po_aggregate(question: str):
+    """PR2PO-only: return (aggregate_function, aggregate_column) for the first
+    recognized keyword in the question, or (None, None) if none matched."""
+    for pattern, (agg_fn, agg_col) in _PR2PO_AGGREGATE_KEYWORDS:
+        if pattern.search(question):
+            return agg_fn, agg_col
+    return None, None
+
+
+# PR2PO-only (FIX #10 safety net): bare GRN wording with no explicit number -- e.g. "GRN
+# received", "GRN not received" -- that the LLM doesn't reliably turn into a grn_quantity
+# filter on its own even with the FIX #10 system-prompt instruction, and that FIX #3's
+# comparison-operator regex can't catch since there's no number in the question at all.
+# Negative phrasing is checked first so "GRN not received" is never mistaken for the
+# positive "GRN received" pattern.
+_PR2PO_GRN_KEYWORD_RULES = (
+    (
+        re.compile(
+            r"\b(?:grn\s*not\s*received|no\s*grn|grn\s*pending|pending\s*grn|"
+            r"grn\s*not\s*done)\b",
+            re.IGNORECASE,
+        ),
+        "= 0",
+    ),
+    (
+        re.compile(
+            r"\b(?:grn\s*received|grn\s*done|goods\s*receipt\s*received|"
+            r"material\s*received|orders?\s+with\s+grn)\b",
+            re.IGNORECASE,
+        ),
+        "> 0",
+    ),
+)
+
+
 _GROUP_BY_KEY_ALIASES = {
     "plant wise": "plant",
     "plant-wise": "plant",
@@ -1547,6 +1789,18 @@ def _apply_deterministic_overrides(question: str, intent: ExtractedIntent) -> Ex
         if pattern.search(question):
             requested_group_by = group_by_column
             break
+
+    # PR2PO-only: override/extend the generic grouping match above. PR2PO has no
+    # material_code column, so a bare "material wise" must resolve to "material_group"
+    # instead; "purchasing group wise" isn't recognized by the generic rules at all.
+    if intent.report == "PR2PO":
+        for pattern, group_by_column in _PR2PO_GROUP_BY_PHRASE_RULES:
+            if pattern.search(question):
+                requested_group_by = group_by_column
+                break
+        else:
+            if requested_group_by == "material_code":
+                requested_group_by = "material_group"
 
     current_group_by = intent.group_by_column
     if current_group_by:
@@ -1659,6 +1913,139 @@ def _apply_deterministic_overrides(question: str, intent: ExtractedIntent) -> Ex
     elif requested_time_grain and not intent.time_grain:
         # Already operation='trend' but the model left time_grain null.
         updates["time_grain"] = requested_time_grain
+
+    # PR2PO-only: preserve a comparison operator the model dropped from a numeric filter.
+    # Gated on the EFFECTIVE report (post KPI-match override) so this never touches
+    # filters for ME2L, Sap_Purchase, PO_release, PR_release, or any other report.
+    effective_report = updates.get("report", intent.report)
+    if effective_report == "PR2PO":
+        for pattern, semantic_key in _PR2PO_COMPARISON_PHRASE_RULES:
+            match = pattern.search(question)
+            if not match:
+                continue
+            op, number = match.groups()
+            current_filters = updates.get("filters", intent.filters) or {}
+            existing_value = str(current_filters.get(semantic_key, ""))
+            if not _COMPARISON_VALUE_ALREADY_HAS_OP_RE.match(existing_value):
+                updates["filters"] = {**current_filters, semantic_key: f"{op} {number}"}
+            break
+
+    # PR2PO-only: tag which date column ("created" | "delivery" | "modified") the question
+    # is actually about, so sql_builder.py can filter on the right one instead of always
+    # defaulting to P2P_Created_On. Gated on the same effective_report as the comparison-
+    # operator fix above, so no other report is affected.
+    if effective_report == "PR2PO":
+        detected_date_type = "created"
+        for pattern, date_type in _PR2PO_DATE_TYPE_PHRASE_RULES:
+            if pattern.search(question):
+                detected_date_type = date_type
+                break
+        if detected_date_type != (intent.date_type or "created"):
+            updates["date_type"] = detected_date_type
+
+    # PR2PO-only (FIX #5 continued): once date_type has pinned down which date column
+    # the question is about, strip the descriptive words that named that column out of
+    # date_phrase, so "delivery date in 2015" resolves to just "2015" instead of tripping
+    # the date resolver on words that aren't part of the date itself.
+    if effective_report == "PR2PO":
+        current_date_type = updates.get("date_type", intent.date_type)
+        current_date_phrase = updates.get("date_phrase", intent.date_phrase)
+        if current_date_type and current_date_phrase:
+            descriptive_words = [
+                "delivery date", "delivery",
+                "last modified", "modified", "changed", "last changed",
+                "created", "creation", "created on",
+                "received", "goods receipt", "goods received",
+                "in", "on", "at",
+            ]
+            cleaned_phrase = current_date_phrase
+            for word in descriptive_words:
+                cleaned_phrase = cleaned_phrase.lower().replace(word, "").strip()
+            if cleaned_phrase and cleaned_phrase != current_date_phrase:
+                updates["date_phrase"] = cleaned_phrase
+
+    # PR2PO-only: bare-year recall safety net. Two failure modes seen in practice:
+    # (a) the model names a year in a plain "... in 2014 ..." question but returns
+    # date_phrase=null entirely (the generic spotter above only recognizes date_resolver's
+    # fixed patterns, and missed these); (b) the model instead stuffs the year into an
+    # unrelated filter value, so it survives as a meaningless filter rather than a date.
+    # Only ever fills date_phrase when it's still empty -- never overrides a phrase the
+    # model or an earlier fix already set.
+    if effective_report == "PR2PO":
+        current_date_phrase = updates.get("date_phrase", intent.date_phrase)
+        if not current_date_phrase:
+            current_filters = updates.get("filters", intent.filters) or {}
+            year_filter_key = next(
+                (
+                    key for key, value in current_filters.items()
+                    if re.fullmatch(r"(?:19|20)\d{2}", str(value).strip())
+                ),
+                None,
+            )
+            if year_filter_key:
+                updates["date_phrase"] = str(current_filters[year_filter_key]).strip()
+                updates["filters"] = {
+                    k: v for k, v in current_filters.items() if k != year_filter_key
+                }
+            else:
+                year_match = re.search(r"\bin\s+((?:19|20)\d{2})\b", question, re.IGNORECASE)
+                if year_match:
+                    updates["date_phrase"] = year_match.group(1)
+
+    # PR2PO-only: date-phrase hallucination guard (Q42-style). The model occasionally
+    # returns a date_phrase built from a relative-period word ("last quarter") that the
+    # question never actually said. Since date_resolver.py can't be touched to add a
+    # "was this really said" check, catch it here: if the phrase names a period unit the
+    # question doesn't mention at all, the phrase was invented -- drop it rather than
+    # filter on a window the user never asked for.
+    if effective_report == "PR2PO":
+        current_date_phrase = updates.get("date_phrase", intent.date_phrase)
+        if current_date_phrase:
+            phrase_lower = current_date_phrase.lower()
+            q_lower = question.lower()
+            for period_word in ("quarter", "month", "week"):
+                if period_word in phrase_lower and period_word not in q_lower:
+                    updates["date_phrase"] = None
+                    break
+
+    # PR2PO-only: run last, after FIX #3 (comparison operators), FIX #5 (grouping) and
+    # FIX #6 (date type) have all had their say, so it validates the final filter set
+    # rather than an intermediate one. Drops any filter the model invented instead of
+    # reading off the question (FIX #7), then trims descriptive words that rode along
+    # with an otherwise-real value (FIX #8) -- in that order, since a hallucinated
+    # filter should be removed outright rather than normalized.
+    if effective_report == "PR2PO":
+        current_filters = updates.get("filters", intent.filters)
+        validated_filters = _validate_pr2po_filters(question, current_filters)
+        normalized_filters = _normalize_pr2po_filter_values(validated_filters)
+        if normalized_filters != current_filters:
+            updates["filters"] = normalized_filters
+
+    # PR2PO-only (FIX #9): fill in aggregate_function/aggregate_column when the model
+    # recognized an "aggregate" question (e.g. "average conversion time by vendor") but
+    # left the function/column null -- see _detect_pr2po_aggregate. Never overrides a
+    # function the model (or an earlier override above) already set.
+    if effective_report == "PR2PO":
+        effective_operation = updates.get("operation", intent.operation)
+        effective_agg_fn = updates.get("aggregate_function", intent.aggregate_function)
+        if effective_operation == "aggregate" and not effective_agg_fn:
+            detected_fn, detected_col = _detect_pr2po_aggregate(question)
+            if detected_fn:
+                updates["aggregate_function"] = detected_fn
+                updates["aggregate_column"] = detected_col
+
+    # PR2PO-only (FIX #10 safety net): catch bare "GRN received"/"GRN not received"
+    # wording the LLM missed. Runs LAST, after _validate_pr2po_filters, since the
+    # synthesized "> 0"/"= 0" value has no literal "0" in the question for that
+    # validator to find -- adding it before validation would get it removed as a
+    # hallucination. Never overrides a grn_quantity the model (or FIX #3) already set.
+    if effective_report == "PR2PO":
+        current_filters = updates.get("filters", intent.filters) or {}
+        if "grn_quantity" not in current_filters:
+            for pattern, grn_value in _PR2PO_GRN_KEYWORD_RULES:
+                if pattern.search(question):
+                    updates["filters"] = {**current_filters, "grn_quantity": grn_value}
+                    break
 
     if not updates:
         return intent
