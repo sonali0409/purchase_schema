@@ -849,7 +849,16 @@ KEY_COLUMNS = {
         'po_number': 'SAP_Purchase_Order',
         'pr_number': 'SAP_Purchase_Requisition',
         'requisitioner': 'Requisitioner',
-        'vendor_name': 'SAP_Name_Of_Supplier'
+        'vendor_name': 'SAP_Name_Of_Supplier',
+        # Numeric SAP user ID that created the PR -- distinct from 'requisitioner'
+        # (a text name) and from 'pr_number' (the PR document number). All three
+        # can look like a bare number/word in a question, so each needs its own key.
+        'created_by': 'PR_Created_By',
+        'purchasing_group': 'SAP_Purchasing_Group',
+        # 'R' = created via MRP run (system generated), 'V' = manually created.
+        'creation_indicator': 'SAP_Creation_Indicator',
+        'pr_processing_status': 'PR_Processing_Status',
+        'pr_deletion_indicator': 'PR_Deletion_Indicator'
     },
 
     'Vendor_PO_History': {
