@@ -887,7 +887,50 @@ logger = logging.getLogger("nl2sql.intent_extractor")
 _REPORT_DESCRIPTIONS = {
     "ME2L": "PO line-item master list: PO/PR numbers, plant, material, vendor, quantities, "
             "prices, department. Use for general 'PO details', 'materials supplied by vendor X', "
-            "'vendors for material Y', 'PO details for plant/date' questions.",
+            "'vendors for material Y', 'PO details for plant/date' questions. Also covers a PO's "
+            "own open-quantity/open-value tracking -- 'still to be delivered quantity', 'still to "
+            "be delivered value', 'still to be invoiced quantity', 'still to be invoiced value', "
+            "'pending delivery quantity/value for a PO', 'pending invoice quantity/value for a PO'. "
+            "Note: 'still to be delivered/invoiced' on a PO is ME2L's own open-quantity/open-value "
+            "tracking, not a goods receipt (GRN) posting -- use Material_Doc_List only when the "
+            "question is specifically about a GRN/goods-receipt posting or movement, not about a "
+            "PO's still-outstanding delivery/invoice amount. Also covers generic, non-person "
+            "PR-counting/listing questions -- 'total number of purchase requisitions', 'how many "
+            "PRs/requisitions' (without naming a specific person), 'PR count', 'requisition count'. "
+            "Note: a generic PR count/list question with no named person belongs here (ME2L), via "
+            "ME2L_Purchase_req_no -- reserve Sap_Purchase specifically for questions that name who "
+            "raised/processed a PR, or ask about PR processing/release status. Also covers "
+            "'material of a PO' / 'material for PO X' / 'what material is on PO X' / 'materials on "
+            "this PO' questions. Note: a question asking what material is ON a given PO (the PO's "
+            "own line-item material) belongs here (ME2L), via PO_Material/PO_Material_Description "
+            "-- reserve Material_Doc_List specifically for GRN/goods-receipt postings and movements, "
+            "not a PO's own material line items. Also covers 'net order value for material X' / "
+            "'value for material X' / 'amount spent on material X' / 'how much material X cost' "
+            "questions. Note: any question asking for a value, amount, or quantity tied to a "
+            "specific material name (not a GRN/goods-receipt posting) belongs here (ME2L) via "
+            "PO_Material_Description, regardless of whether the word 'material' appears before or "
+            "after the item name in the question. Also covers 'POs created against PR X' / "
+            "'purchase orders for PR X' / 'PO generated against PR' / 'all POs against a PR "
+            "number' / 'show all POs against a PR' / 'POs created against PR number X' / "
+            "'purchase orders raised from PR X' / 'what PO was raised against PR' / 'PO "
+            "generated from requisition' questions. Note: any question asking what PO(s) were "
+            "created from/against a specific PR number belongs here (ME2L), via "
+            "ME2L_Purchase_req_no -- reserve Sap_Purchase for questions about who raised/"
+            "processed the PR itself, not the resulting PO. CRITICAL: any question of the form "
+            "'show PO(s) for/against/from PR X' belongs to ME2L (it asks for the resulting PO "
+            "details), NOT Sap_Purchase (which is only for questions about who raised/processed "
+            "the PR itself, like 'who raised PR X' or 'what is the status of PR X'). "
+            "IMPORTANT: when the question asks for PURCHASE ORDERS (POs) that were created "
+            "from/against a PR number, this ALWAYS belongs to ME2L regardless of phrasing -- "
+            "ME2L is the purchase order report. Only route to Sap_Purchase when the question is "
+            "about the REQUISITION itself (who raised it, its status, its processing). Examples "
+            "that MUST use ME2L: 'show POs against PR X', 'what PO was created from PR X', 'POs "
+            "raised from requisition X', 'purchase orders for PR X'. "
+            "IMPORTANT: 'still to be invoiced value/quantity', 'pending invoice value/quantity' "
+            "belong to ME2L (via Still_to_be_invoiced_value / Still_to_be_invoiced_qty columns) "
+            "-- do NOT route these to Vendor_PO_History or Material_Doc_List. Only use those "
+            "reports for actual posted GRN/invoice documents, not for pending/open amounts on a "
+            "purchase order.",
     "PO_release": "PO approval workflow: release status, approver levels (L1-L5), release dates, "
                   "days taken to approve, number of releases required. Use for 'released/unreleased/"
                   "pending PO', 'days taken to approve PO', 'level wise approval'.",
@@ -1513,6 +1556,34 @@ _PR2PO_COMPARISON_PHRASE_RULES = (
     ),
 )
 
+# ME2L-only: mirrors _PR2PO_COMPARISON_PHRASE_RULES above -- spots an explicit
+# "<metric> <exceeds/greater than/above> <number>" phrase in the raw question
+# (e.g. "net order value exceeds 1,000,000") and carries the comparison
+# operator into intent.filters as "> 1000000" instead of losing it to an
+# exact-match filter. sql_builder.py's ME2L comparison handling (see
+# _ME2L_EXTRA_FILTER_COLUMNS / _ME2L_COMPARISON_COLUMNS) then turns that into
+# a real numeric WHERE condition.
+_ME2L_COMPARISON_PHRASE_RULES = (
+    (
+        re.compile(
+            r"\b(?:net\s*order\s*value|order\s*value|value)\b\s*"
+            r"(?:exceeds?|greater\s*than|more\s*than|above|>)\s*"
+            r"([\d,]+(?:\.\d+)?)",
+            re.IGNORECASE,
+        ),
+        "net_order_value",
+    ),
+    (
+        re.compile(
+            r"\b(?:order\s*quantity|quantity|qty)\b\s*"
+            r"(?:exceeds?|greater\s*than|more\s*than|above|>)\s*"
+            r"([\d,]+(?:\.\d+)?)",
+            re.IGNORECASE,
+        ),
+        "order_quantity",
+    ),
+)
+
 
 _COMPARISON_VALUE_ALREADY_HAS_OP_RE = re.compile(r"^\s*(<=|>=|!=|<>|=|<|>)")
 
@@ -1681,6 +1752,152 @@ def _detect_pr2po_aggregate(question: str):
     return None, None
 
 
+# ME2L-only (mirrors PR2PO FIX #9): recall safety net for "total net order value for
+# material air cooler"-style questions where the model recognizes operation="aggregate"
+# but leaves aggregate_function/aggregate_column null. Keyword -> function, checked in
+# this order so a more specific word never loses to a less specific one appearing later
+# in the same question.
+_ME2L_AGGREGATE_FUNCTION_KEYWORDS = (
+    (re.compile(r"\b(?:total|sum)\b", re.IGNORECASE), "SUM"),
+    (re.compile(r"\b(?:average|avg)\b", re.IGNORECASE), "AVG"),
+    (re.compile(r"\b(?:minimum|min|lowest)\b", re.IGNORECASE), "MIN"),
+    (re.compile(r"\b(?:maximum|max|highest|top)\b", re.IGNORECASE), "MAX"),
+)
+
+
+# ME2L-only: date_resolver.py already understands "this fy" / "last
+# fy" but not their common plain-English synonyms. Rather than teach
+# date_resolver.py new phrases (out of scope), we normalize the
+# question's date_phrase to a form it already supports before it gets
+# there. Confirmed live: "Show current fiscal year net order value
+# trend month wise" failed with "Unrecognized date phrase: 'current
+# fiscal year'" even though "this fy" works for the identical period.
+_ME2L_DATE_PHRASE_ALIASES = {
+    "current fiscal year": "this fy",
+    "current financial year": "this fy",
+    "current fy": "this fy",
+    "present fiscal year": "this fy",
+    "present financial year": "this fy",
+    "this fiscal year": "this fy",
+    "this financial year": "this fy",
+    "last fiscal year": "last fy",
+    "last financial year": "last fy",
+    "previous fiscal year": "last fy",
+    "previous financial year": "last fy",
+}
+
+
+# ME2L-only: "top N <dimension>" is a RANKING instruction (rank the
+# top N suppliers/materials/etc. by some metric), not a MAX-function
+# word -- but _detect_me2l_aggregate's keyword list also treats "top"
+# as a MAX synonym for genuine single-value questions like "what is
+# the top order quantity" (no dimension named). This regex captures N
+# and the dimension word so we can tell the two apart. Confirmed live:
+# "Show top 10 materials by order quantity this year" was misread as
+# a MAX-only aggregate instead of a top-10 ranking.
+_ME2L_TOP_N_RE = re.compile(
+    r"\btop\s+(\d+)\b", re.IGNORECASE
+)
+_ME2L_TOP_N_DIMENSION_RULES = (
+    (re.compile(r"\bmaterials?\b", re.IGNORECASE), "material_desc"),
+    (re.compile(r"\b(?:suppliers?|vendors?)\b", re.IGNORECASE), "vendor_name"),
+    (re.compile(r"\bdepartments?\b", re.IGNORECASE), "department"),
+    (re.compile(r"\bplants?\b", re.IGNORECASE), "plant"),
+    (re.compile(r"\bpurchasing\s+groups?\b", re.IGNORECASE), "purchasing_group"),
+)
+
+# ME2L-only: material_desc/material_code are extremely high-
+# cardinality group-by dimensions (6,600+ distinct values seen live)
+# -- the global default row cap (settings.MAX_ROWS, out of scope to
+# change) silently truncates a full material-wise breakdown to 500
+# rows with no indication anything was cut off. When no explicit
+# "top N" limit was requested, raise the effective limit high enough
+# to return the full breakdown for this dimension specifically. Must
+# NOT override an explicit limit the user/ranking-detection already
+# set (e.g. "top 10 materials" must still return exactly 10).
+_ME2L_HIGH_CARDINALITY_GROUP_BY_COLUMNS = {"material_desc", "material_code"}
+_ME2L_HIGH_CARDINALITY_DEFAULT_LIMIT = 10000
+
+_ME2L_FILTER_VALUE_DESCRIPTORS = {
+    "department", "dept", "group", "code", "status", "name", "type",
+    "level", "category", "all", "any", "each", "every", "their",
+}
+_ME2L_FILTER_NOISE_VALUES = {
+    "all", "any", "each", "every", "their", ">", "<",
+    "null", "none", "n/a", "na", "undefined",
+}
+_ME2L_FILTER_KEY_WORDS = {
+    "department": {"department", "dept"},
+    "vendor_name": {"vendor", "name", "supplier"},
+    "plant": {"plant"},
+    "material_desc": {"material", "description", "desc"},
+    "material_code": {"material", "code"},
+    "purchasing_group": {"purchasing", "group"},
+    "po_number": {"po", "number"},
+    "pr_number": {"pr", "number"},
+}
+
+
+def _normalize_me2l_filter_values(filters: dict) -> dict:
+    """ME2L-only: strip a leading/trailing descriptor word off each
+    filter value (e.g. "admin dept" -> "admin") -- mirrors the
+    existing PR2PO normalization (FIX #8) but for ME2L. Confirmed
+    live: "for admin dept" produced department filter value
+    "admin dept" instead of "admin", causing an exact-match SQL
+    condition that never matched real data."""
+    normalized = {}
+    for key, value in (filters or {}).items():
+        if isinstance(value, str) and value.strip():
+            descriptors = _ME2L_FILTER_VALUE_DESCRIPTORS | _ME2L_FILTER_KEY_WORDS.get(key, set())
+            tokens = value.split()
+            start = 0
+            while start < len(tokens) - 1 and re.sub(r"[^\w&]", "", tokens[start]).lower() in descriptors:
+                start += 1
+            end = len(tokens)
+            while end > start + 1 and re.sub(r"[^\w&]", "", tokens[end - 1]).lower() in descriptors:
+                end -= 1
+            cleaned = " ".join(tokens[start:end]).strip()
+            if not cleaned or cleaned.lower() in _ME2L_FILTER_NOISE_VALUES:
+                continue
+            normalized[key] = cleaned
+        else:
+            normalized[key] = value
+    return normalized
+
+
+def _detect_me2l_aggregate(question: str):
+    """ME2L-only: return (aggregate_function, aggregate_column) detected from the
+    question text, or (None, None) / (fn, None) if either isn't found. The function
+    is the first recognized keyword from _ME2L_AGGREGATE_FUNCTION_KEYWORDS; the
+    column is the longest matching phrase from sql_builder.AGGREGATE_COLUMN_ALIASES
+    ["ME2L"] found in the lowercased question (longest first, so "net order value"
+    wins over bare "value"). Returns the alias PHRASE itself (e.g. "net order
+    value"), not a raw SAP column name -- sql_builder._resolve_aggregate_column()
+    already looks phrases up in AGGREGATE_COLUMN_ALIASES, so passing the raw phrase
+    is correct and matches how the rest of this codebase resolves aggregate_column."""
+    agg_fn = None
+    for pattern, fn in _ME2L_AGGREGATE_FUNCTION_KEYWORDS:
+        if pattern.search(question):
+            agg_fn = fn
+            break
+
+    agg_col = None
+    q_lower = question.lower()
+    aliases = sqb.AGGREGATE_COLUMN_ALIASES.get("ME2L", {})
+    # Sort candidate phrases longest-first so a specific multi-word phrase
+    # (e.g. "net order value") is checked -- and can win -- before a shorter
+    # phrase it happens to contain a word of (e.g. "order quantity"/"order").
+    # Use a word-boundary regex rather than plain substring containment so a
+    # phrase can't spuriously match inside an unrelated longer word (e.g.
+    # "order" inside "reorder").
+    for phrase in sorted(aliases.keys(), key=len, reverse=True):
+        if re.search(r"\b" + re.escape(phrase) + r"\b", q_lower):
+            agg_col = phrase
+            break
+
+    return agg_fn, agg_col
+
+
 # PR2PO-only (FIX #10 safety net): bare GRN wording with no explicit number -- e.g. "GRN
 # received", "GRN not received" -- that the LLM doesn't reliably turn into a grn_quantity
 # filter on its own even with the FIX #10 system-prompt instruction, and that FIX #3's
@@ -1802,6 +2019,67 @@ def _apply_deterministic_overrides(question: str, intent: ExtractedIntent) -> Ex
             if requested_group_by == "material_code":
                 requested_group_by = "material_group"
 
+    # ME2L-only: the shared _GROUP_BY_PHRASE_RULES above only recognizes
+    # "vendor"-wording ("vendor-wise", "by vendor", etc.) -> vendor_name.
+    # ME2L's own column is Name_of_Supplier, so "supplier-wise"/"by
+    # supplier"/"per supplier"/"supplier breakdown" is equally natural
+    # phrasing for this report and needs its own recognition. Confirmed
+    # live: "Show supplier-wise total net order value in this month"
+    # returned group_by_column: null before this fix.
+    if intent.report == "ME2L":
+        if re.search(
+            r"\b(?:supplier\s*[-\s]?wise|by\s+supplier|per\s+supplier|"
+            r"supplier\s+breakdown)\b",
+            question,
+            re.IGNORECASE,
+        ):
+            requested_group_by = "vendor_name"
+        # ME2L-only: "purchasing group-wise"/"pg-wise"/"by purchasing group"
+        # grouping phrases -- not recognized by the generic
+        # _GROUP_BY_PHRASE_RULES or any other ME2L-only pattern above.
+        # Confirmed gap: "Show purchasing group-wise PO count for the
+        # current year" returned group_by_column: null before this fix.
+        if re.search(
+            r"\b(?:purchasing\s+group\s*[-\s]?wise|pg\s*[-\s]?wise|"
+            r"by\s+purchasing\s+group|purchasing\s+group\s+wise)\b",
+            question,
+            re.IGNORECASE,
+        ):
+            requested_group_by = "purchasing_group"
+        # ME2L-only: same pattern as the supplier-wise block above, extended
+        # to material group, purchasing doc type, and PO/PR-wise grouping
+        # phrases -- none of these are recognized by the generic
+        # _GROUP_BY_PHRASE_RULES. Confirmed gap: "material group-wise",
+        # "purchasing doc type-wise", "PO-wise", "PR-wise" all returned
+        # group_by_column: null before this fix.
+        if re.search(
+            r"\b(?:material\s*group\s*[-\s]?wise|by\s+material\s+group|"
+            r"per\s+material\s+group|material\s+group\s+breakdown)\b",
+            question,
+            re.IGNORECASE,
+        ):
+            requested_group_by = "material_group"
+        if re.search(
+            r"\b(?:purchasing\s+doc(?:ument)?\s+type\s*[-\s]?wise|"
+            r"by\s+purchasing\s+doc(?:ument)?\s+type|"
+            r"document\s+type\s*[-\s]?wise|by\s+document\s+type)\b",
+            question,
+            re.IGNORECASE,
+        ):
+            requested_group_by = "purchasing_doc_type"
+        if re.search(
+            r"\b(?:po\s*[-\s]?wise|by\s+po|po\s+breakdown)\b",
+            question,
+            re.IGNORECASE,
+        ):
+            requested_group_by = "po_number"
+        if re.search(
+            r"\b(?:pr\s*[-\s]?wise|by\s+pr|pr\s+breakdown)\b",
+            question,
+            re.IGNORECASE,
+        ):
+            requested_group_by = "pr_number"
+
     current_group_by = intent.group_by_column
     if current_group_by:
         normalized_group_by = _GROUP_BY_KEY_ALIASES.get(str(current_group_by).strip().lower())
@@ -1829,6 +2107,43 @@ def _apply_deterministic_overrides(question: str, intent: ExtractedIntent) -> Ex
         cleaned_date_phrase = _sanitize_date_phrase(intent.date_phrase)
         if cleaned_date_phrase != intent.date_phrase:
             updates["date_phrase"] = cleaned_date_phrase
+
+    # ME2L-only: normalize plain-English fiscal-year synonyms ("current fiscal
+    # year", "present financial year", etc.) to the exact phrasing
+    # date_resolver.py already supports ("this fy" / "last fy"), rather than
+    # teaching date_resolver.py new phrases. Exact (case-insensitive,
+    # trimmed) match only -- no partial/substring matching, so an unrelated
+    # phrase merely containing one of these words is never rewritten.
+    if intent.report == "ME2L":
+        # ME2L-only: the model occasionally returns the literal string "null"
+        # (or "none"/"n/a"/etc.) as date_phrase instead of an actual Python
+        # None when no date was mentioned -- downstream date resolution then
+        # fails with "Unrecognized date phrase: 'null'" instead of simply
+        # skipping the date filter. Confirmed live: "Show department-wise
+        # still to be delivered value" returned date_phrase: "null".
+        current_date = updates.get("date_phrase", intent.date_phrase)
+        if isinstance(current_date, str) and current_date.strip().lower() in (
+            "null", "none", "n/a", "na", "", "undefined",
+        ):
+            updates["date_phrase"] = None
+        current_date_phrase = updates.get("date_phrase", intent.date_phrase)
+        if current_date_phrase:
+            normalized = _ME2L_DATE_PHRASE_ALIASES.get(
+                str(current_date_phrase).strip().lower()
+            )
+            if normalized and normalized != current_date_phrase:
+                updates["date_phrase"] = normalized
+
+        # ME2L-only: mirrors the date_phrase "null"-string sanitization above --
+        # the model sometimes returns the literal string "null" (or "none"/
+        # "n/a"/etc.) as group_by_column instead of an actual Python None.
+        # Confirmed live: "Which materials have the highest pending delivery
+        # quantity?" returned group_by_column: "null".
+        current_group = updates.get("group_by_column", intent.group_by_column)
+        if isinstance(current_group, str) and current_group.strip().lower() in (
+            "null", "none", "n/a", "na", "", "undefined",
+        ):
+            updates["group_by_column"] = None
 
     # ------------------------------------------------------------------
     # Date-phrase recall safety net.
@@ -1914,6 +2229,23 @@ def _apply_deterministic_overrides(question: str, intent: ExtractedIntent) -> Ex
         # Already operation='trend' but the model left time_grain null.
         updates["time_grain"] = requested_time_grain
 
+    # ME2L-only safety net (Q44): "POs created/generated/raised against/from PR X"
+    # keeps misrouting to Sap_Purchase even with the ME2L description extended
+    # multiple times -- the question asks for the resulting PURCHASE ORDER(s),
+    # which is ME2L's domain, not the requisition itself. Gated strictly to only
+    # fire when the model's chosen report would otherwise be Sap_Purchase, so no
+    # other report's routing is touched.
+    _pre_route_report = updates.get("report", intent.report)
+    if _pre_route_report == "Sap_Purchase":
+        _pre_route_filters = updates.get("filters", intent.filters) or {}
+        _po_against_pr_match = re.search(
+            r"\bpos?\b.{0,20}\b(?:created|generated|raised|against|from)\b.{0,20}\bpr\b",
+            question,
+            re.IGNORECASE,
+        )
+        if "po_number" in _pre_route_filters or _po_against_pr_match:
+            updates["report"] = "ME2L"
+
     # PR2PO-only: preserve a comparison operator the model dropped from a numeric filter.
     # Gated on the EFFECTIVE report (post KPI-match override) so this never touches
     # filters for ME2L, Sap_Purchase, PO_release, PR_release, or any other report.
@@ -1929,6 +2261,32 @@ def _apply_deterministic_overrides(question: str, intent: ExtractedIntent) -> Ex
             if not _COMPARISON_VALUE_ALREADY_HAS_OP_RE.match(existing_value):
                 updates["filters"] = {**current_filters, semantic_key: f"{op} {number}"}
             break
+
+    # ME2L-only: mirrors the PR2PO comparison-operator fix above. Spots an explicit
+    # threshold phrase ("net order value exceeds 1,000,000") and carries it into
+    # intent.filters as "> 1000000" so sql_builder.py's ME2L comparison handling
+    # (_ME2L_EXTRA_FILTER_COLUMNS / _ME2L_COMPARISON_COLUMNS) can build a real
+    # numeric WHERE condition instead of an exact-match filter. Gated on the
+    # effective report, so no other report is affected. Never overrides a value
+    # already present for that key.
+    if effective_report == "ME2L":
+        for comp_pattern, comp_key in _ME2L_COMPARISON_PHRASE_RULES:
+            m = comp_pattern.search(question)
+            if m:
+                raw_val = m.group(1).replace(",", "").strip()
+                # False-positive guard: the regex's numeric capture group can
+                # still land on a non-numeric token in some phrasings (e.g.
+                # "with their PR numbers" matched "numbers" as raw_val).
+                # Only apply the filter when what was captured is actually
+                # a plain number.
+                if not re.match(r"^\d+(?:\.\d+)?$", raw_val):
+                    continue
+                current_filters = updates.get("filters", intent.filters) or {}
+                if comp_key not in current_filters:
+                    updated = dict(current_filters)
+                    updated[comp_key] = f"> {raw_val}"
+                    updates["filters"] = updated
+                break
 
     # PR2PO-only: tag which date column ("created" | "delivery" | "modified") the question
     # is actually about, so sql_builder.py can filter on the right one instead of always
@@ -2033,6 +2391,208 @@ def _apply_deterministic_overrides(question: str, intent: ExtractedIntent) -> Ex
             if detected_fn:
                 updates["aggregate_function"] = detected_fn
                 updates["aggregate_column"] = detected_col
+
+    # ME2L-only (mirrors PR2PO FIX #9): fill in aggregate_function/aggregate_column
+    # when the model recognized an "aggregate" question (e.g. "total net order value
+    # for material air cooler") but left the function and/or column null -- see
+    # _detect_me2l_aggregate. Never overrides a value the model (or an earlier
+    # override above) already set.
+    if effective_report == "ME2L":
+        effective_operation = updates.get("operation", intent.operation)
+        effective_agg_fn = updates.get("aggregate_function", intent.aggregate_function)
+        effective_agg_col = updates.get("aggregate_column", intent.aggregate_column)
+        ranking_match = _ME2L_TOP_N_RE.search(question)
+        ranking_dimension = None
+        question_for_agg_detect = question
+        if ranking_match:
+            for pattern, dim_key in _ME2L_TOP_N_DIMENSION_RULES:
+                if pattern.search(question):
+                    ranking_dimension = dim_key
+                    break
+            if ranking_dimension:
+                current_group_by_for_ranking = updates.get("group_by_column", intent.group_by_column)
+                if not current_group_by_for_ranking:
+                    updates["group_by_column"] = ranking_dimension
+                current_limit = updates.get("limit", intent.limit)
+                if not current_limit:
+                    updates["limit"] = int(ranking_match.group(1))
+                # Strip "top N" so the function-keyword detector below doesn't
+                # misread "top" as MAX for this ranking question.
+                question_for_agg_detect = _ME2L_TOP_N_RE.sub("", question)
+        # ME2L-only: "which supplier has the highest net order value" / "top
+        # departments by pending value" -- "top"/"highest" with NO explicit
+        # number. Without this, the bare MAX keyword below turns it into a
+        # single MAX value instead of a ranked list, the same MAX-vs-ranking
+        # risk seen on "top N" questions before _ME2L_TOP_N_RE existed. Only
+        # fires when no explicit number was already found above.
+        if not ranking_match:
+            if re.search(r"\b(?:top|highest|largest|most)\b", question, re.IGNORECASE):
+                for pattern, dim_key in _ME2L_TOP_N_DIMENSION_RULES:
+                    if pattern.search(question):
+                        current_group = updates.get("group_by_column", intent.group_by_column)
+                        if not current_group:
+                            updates["group_by_column"] = dim_key
+                        current_limit = updates.get("limit", intent.limit)
+                        if not current_limit:
+                            updates["limit"] = 10
+                        question_for_agg_detect = re.sub(
+                            r"\b(?:top|highest|largest|most)\b", "", question,
+                            flags=re.IGNORECASE)
+                        break
+        # Extended to also cover "trend" questions with a value metric (e.g. "net
+        # order value trend month wise") -- confirmed live that trend silently fell
+        # back to counting documents instead of summing the named value column when
+        # this was aggregate-only.
+        if effective_operation in ("aggregate", "trend") and (not effective_agg_fn or not effective_agg_col):
+            detected_fn, detected_col = _detect_me2l_aggregate(question_for_agg_detect)
+            if not effective_agg_fn and detected_fn:
+                updates["aggregate_function"] = detected_fn
+            if not effective_agg_col and detected_col:
+                updates["aggregate_column"] = detected_col
+            # NEW: trend-only SUM default. A "value trend" question ("net
+            # order value trend month wise") very rarely spells out "total" --
+            # the aggregation is conventionally SUM unless the user names a
+            # different function. This must NEVER apply to plain "aggregate"
+            # questions (those should keep erroring if the function is truly
+            # ambiguous), only to "trend". Confirmed live: aggregate_column
+            # was correctly detected as "net order value" but
+            # aggregate_function stayed null because no function keyword
+            # ("total"/"sum"/etc.) appears in this phrasing.
+            if effective_operation == "trend":
+                final_agg_fn = updates.get("aggregate_function", effective_agg_fn)
+                final_agg_col = updates.get("aggregate_column", effective_agg_col)
+                if final_agg_col and not final_agg_fn:
+                    updates["aggregate_function"] = "SUM"
+
+        # ME2L-only: when a ranking dimension was detected (top N <dimension>)
+        # and a metric column was found but no explicit function word remains
+        # after stripping "top N", default to SUM -- ranking by total is the
+        # overwhelming convention ("top 10 materials by order quantity" means
+        # by total quantity, not by a single line's max). Must NOT apply to
+        # non-ranking aggregate questions -- only fires when ranking_dimension
+        # was actually detected above.
+        if effective_operation == "aggregate" and ranking_dimension:
+            final_agg_fn = updates.get("aggregate_function", effective_agg_fn)
+            final_agg_col = updates.get("aggregate_column", effective_agg_col)
+            if final_agg_col and not final_agg_fn:
+                updates["aggregate_function"] = "SUM"
+
+        # ME2L-only: plain "aggregate" questions that name a metric but no
+        # function word ("show me net order value for X") are effectively
+        # always asking for a total in practice -- default to SUM here too,
+        # mirroring the existing trend-only and ranking-only SUM defaults.
+        # Must NOT double-fire when the ranking-only default above already
+        # handled it (ranking_dimension check prevents that). Confirmed
+        # live: "Show me net order value for PONTY CHADHA FOUNDATION in
+        # last year" found aggregate_column correctly but aggregate_function
+        # stayed null with no function word present.
+        if effective_operation == "aggregate" and not ranking_dimension:
+            final_agg_fn = updates.get("aggregate_function", effective_agg_fn)
+            final_agg_col = updates.get("aggregate_column", effective_agg_col)
+            if final_agg_col and not final_agg_fn:
+                updates["aggregate_function"] = "SUM"
+
+    # ME2L-only: material_desc/material_code are extremely high-cardinality
+    # group-by dimensions -- see _ME2L_HIGH_CARDINALITY_GROUP_BY_COLUMNS above
+    # for the full rationale. Runs after all group_by_column resolution above
+    # (including the ranking-detection block) so it sees the FINAL,
+    # fully-resolved group_by_column, and never overrides an explicit limit.
+    if effective_report == "ME2L":
+        final_group_by = updates.get("group_by_column", intent.group_by_column)
+        final_limit = updates.get("limit", intent.limit)
+        if (
+            final_group_by in _ME2L_HIGH_CARDINALITY_GROUP_BY_COLUMNS
+            and not final_limit
+        ):
+            updates["limit"] = _ME2L_HIGH_CARDINALITY_DEFAULT_LIMIT
+
+    # ME2L-only (Q60): a question with both a group_by dimension and an
+    # aggregate metric ("department-wise still to be delivered value") is
+    # always a grouped aggregate, never a KPI lookup -- the model sometimes
+    # sets kpi_id (e.g. "pr-po-details") alongside a clear group-by-aggregate
+    # intent, which then hijacks the query into returning unrelated detail
+    # rows instead of the requested breakdown. Confirmed live: "Show
+    # department-wise still to be delivered value" set kpi_id="pr-po-details".
+    if effective_report == "ME2L":
+        final_group_by_for_kpi = updates.get("group_by_column", intent.group_by_column)
+        final_agg_col_for_kpi = updates.get("aggregate_column", intent.aggregate_column)
+        final_kpi_id = updates.get("kpi_id", intent.kpi_id)
+        if final_group_by_for_kpi and final_agg_col_for_kpi and final_kpi_id:
+            updates["kpi_id"] = None
+
+    # ME2L-only (Q44): "show all POs created against PR X" is asking what
+    # PO(s) resulted from a PR -- a plain list/lookup filtered by pr_number,
+    # not a KPI count. The model still set kpi_id="pr-created" here even
+    # after the report was correctly routed to ME2L, which hijacked the
+    # query into returning a count instead of the actual PO number.
+    if effective_report == "ME2L":
+        final_filters_for_kpi = updates.get("filters", intent.filters) or {}
+        final_kpi_id_for_pr = updates.get("kpi_id", intent.kpi_id)
+        po_against_pr_kpi_match = re.search(
+            r"\bpos?\b.{0,20}\b(?:created|generated|raised|against|from)\b",
+            question,
+            re.IGNORECASE,
+        )
+        if "pr_number" in final_filters_for_kpi and final_kpi_id_for_pr and po_against_pr_kpi_match:
+            updates["kpi_id"] = None
+            final_operation_for_pr = updates.get("operation", intent.operation)
+            if final_operation_for_pr != "list":
+                updates["operation"] = "list"
+
+    # ME2L-only (Q60): drop a filter entirely if its value(s) don't actually
+    # appear anywhere in the original question text -- a safety net against
+    # the model inventing multi-value filters out of thin air. Confirmed
+    # live: "Show department-wise still to be delivered value" (no vendor/
+    # department name mentioned at all) set filters={"department":
+    # ["sales", "admin"]}. Only checks list-valued filters, since a single
+    # string value is already covered by the descriptor-trimming
+    # normalization below.
+    if effective_report == "ME2L":
+        current_filters_for_hallucination_check = dict(updates.get("filters", intent.filters) or {})
+        question_lower_for_hallucination_check = question.lower()
+        hallucination_checked_filters = {}
+        filters_changed_by_hallucination_check = False
+        for f_key, f_value in current_filters_for_hallucination_check.items():
+            if isinstance(f_value, list) and f_value:
+                if all(
+                    isinstance(v, str) and v.strip()
+                    and v.strip().lower() not in question_lower_for_hallucination_check
+                    for v in f_value
+                ):
+                    filters_changed_by_hallucination_check = True
+                    continue
+            hallucination_checked_filters[f_key] = f_value
+        if filters_changed_by_hallucination_check:
+            updates["filters"] = hallucination_checked_filters
+
+    # ME2L-only: trim descriptive words that rode along with an
+    # otherwise-real filter value (e.g. "admin dept" -> "admin"),
+    # mirroring the PR2PO normalization fix. No hallucination-check step
+    # is added here -- only normalization of values already present.
+    if effective_report == "ME2L":
+        current_filters = updates.get("filters", intent.filters)
+        normalized_filters = _normalize_me2l_filter_values(current_filters)
+        if normalized_filters != current_filters:
+            updates["filters"] = normalized_filters
+
+    # ME2L-only (Q71): targeted correction for "which suppliers have the
+    # highest pending invoice value" style questions -- the model has been
+    # seen to completely confuse the dimension/metric here, returning
+    # group_by="material_desc" and aggregate_column="pending delivery
+    # quantity" instead of group_by="vendor_name" and aggregate_column=
+    # "pending invoice value". Only fires when the question explicitly
+    # names a pending/still-to-be-invoiced metric together with a
+    # supplier/vendor dimension.
+    if effective_report == "ME2L":
+        q_lower = question.lower()
+        if "pending invoice" in q_lower or "still to be invoiced" in q_lower:
+            if re.search(r"\b(?:supplier|vendor)\b", q_lower):
+                current_group = updates.get("group_by_column", intent.group_by_column)
+                if current_group != "vendor_name":
+                    updates["group_by_column"] = "vendor_name"
+            current_agg = updates.get("aggregate_column", intent.aggregate_column)
+            if current_agg and "delivery" in str(current_agg).lower():
+                updates["aggregate_column"] = "pending invoice value"
 
     # PR2PO-only (FIX #10 safety net): catch bare "GRN received"/"GRN not received"
     # wording the LLM missed. Runs LAST, after _validate_pr2po_filters, since the

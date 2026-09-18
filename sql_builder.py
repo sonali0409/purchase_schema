@@ -254,6 +254,34 @@ GROUP_BY_KEY_ALIASES = {
     "material_code": "material_code",
     "vendor wise": "vendor_name",
     "vendor-wise": "vendor_name",
+    "material group": "material_group",
+    "material group wise": "material_group",
+    "material group-wise": "material_group",
+    "material_group": "material_group",
+    "purchasing doc type": "purchasing_doc_type",
+    "purchasing doc type wise": "purchasing_doc_type",
+    "purchasing doc type-wise": "purchasing_doc_type",
+    "purchasing_doc_type": "purchasing_doc_type",
+    "purchasing document type": "purchasing_doc_type",
+    "purchasing document type wise": "purchasing_doc_type",
+    "document type": "purchasing_doc_type",
+    "po wise": "po_number",
+    "po-wise": "po_number",
+    "pr wise": "pr_number",
+    "pr-wise": "pr_number",
+    "purchasing_document_type": "purchasing_doc_type",
+    "po_material": "material_code",
+    "PO_Number": "po_number",
+    "po_number": "po_number",
+    "po number": "po_number",
+    "pr number": "pr_number",
+    "supplier wise": "vendor_name",
+    "supplier-wise": "vendor_name",
+    "by supplier": "vendor_name",
+    "supplier": "vendor_name",
+    "PO_Material_Description": "material_desc",
+    "po_material_description": "material_desc",
+    "PO_Material": "material_code",
 }
 
 AGGREGATE_COLUMN_ALIASES = {
@@ -270,6 +298,19 @@ AGGREGATE_COLUMN_ALIASES = {
         "price": "PO_Net_Price",
         "net price": "PO_Net_Price",
         "po_net_price": "PO_Net_Price",
+        "still to be delivered quantity": "Still_to_be_delivered_qty",
+        "still to be delivered value": "Still_to_be_delivered_value",
+        "still to be invoiced quantity": "Still_to_be_invoiced_qty",
+        "still to be invoiced value": "Still_to_be_invoiced_value",
+        "pending delivery quantity": "Still_to_be_delivered_qty",
+        "pending delivery value": "Still_to_be_delivered_value",
+        "pending invoice quantity": "Still_to_be_invoiced_qty",
+        "pending invoice value": "Still_to_be_invoiced_value",
+        "still to be delivered": "Still_to_be_delivered_value",
+        "still to be invoiced": "Still_to_be_invoiced_value",
+        "purchase value": "Net_Order_Value",
+        "total purchase value": "Net_Order_Value",
+        "purchases": "Net_Order_Value",
     },
     "PO_release": {
         "amount": "POR_Amount",
@@ -373,7 +414,7 @@ DISPLAY_COLUMNS = {
 # grain rather than the line-item grain (line-item columns like item no/qty/price are excluded).
 DOC_LEVEL_COLUMNS = {
     "ME2L": ["PO_Number", "PO_Document_Date", "PO_Plant", "Plant_Description", "Name_of_Supplier",
-             "PO_Department_Name"],
+             "PO_Department_Name", "PO_Material", "PO_Material_Description"],
     "PO_release": ["POR_PO", "POR_Plant_Code", "PO_Release_Status", "Created_By_Name", "PO_Created_On"],
     "PR_release": ["PR_Number", "PR_Plant", "PR_Department", "PR_Release_Status", "PR_Created_On"],
     "Vendor_PO_History": ["VH_PO_No", "VH_Plant", "VH_Vendor_Name", "VH_PO_Date", "VH_Department"],
@@ -451,6 +492,37 @@ _COMPARISON_OP_RE = re.compile(r"^\s*(<=|>=|!=|<>|=|<|>)\s*(.+)$")
 _PR2PO_NUMERIC_COMPARISON_COLUMNS = {"P2P_GRN_Quantity", "PR_To_PO_Days"}
 _PR2PO_MAGNITUDE_OPS = {"<", ">", "<=", ">=", "=", "<>"}
 
+# ME2L-only: mirrors _PR2PO_EXTRA_FILTER_COLUMNS -- semantic filter keys for
+# threshold/comparison filters (e.g. "net order value exceeds 1,000,000") that
+# the generic KEY_COLUMNS map doesn't carry for ME2L.
+_ME2L_EXTRA_FILTER_COLUMNS = {
+    "net_order_value": "Net_Order_Value",
+    "order_quantity": "Order_Quantity",
+}
+
+# ME2L-only: mirrors _PR2PO_NUMERIC_COMPARISON_COLUMNS -- these columns are
+# VARCHAR in the underlying view, so a magnitude comparison against a bare
+# numeric literal needs an explicit cast.
+_ME2L_COMPARISON_COLUMNS = {"Net_Order_Value", "Order_Quantity"}
+
+# ME2L-only: mirrors the PR2PO VARCHAR-cast pattern above -- these money/quantity
+# columns (the real column names behind AGGREGATE_COLUMN_ALIASES["ME2L"]) are also
+# stored as VARCHAR in the underlying view, so SUM/AVG/MIN/MAX needs an explicit
+# cast, or Presto/Trino rejects the aggregate with 'Unexpected parameters (varchar)'.
+# Cast to DOUBLE rather than INT (as PR2PO's day-counts do) since these can have
+# decimals (e.g. 3000.00).
+_ME2L_NUMERIC_AGGREGATE_COLUMNS = {
+    "Net_Order_Value", "Order_Quantity", "PO_Net_Price",
+    "Still_to_be_delivered_qty", "Still_to_be_delivered_value",
+    "Still_to_be_invoiced_qty", "Still_to_be_invoiced_value",
+}
+
+# ME2L-only: the raw unified table has confirmed exact-duplicate rows per line
+# item (same PO+Item, every column identical) -- see PO 5400010477, which
+# returned 4 rows instead of 2. This is the natural line-item key used to dedupe
+# before aggregating, so SUM/AVG/MIN/MAX don't double-count the physical copies.
+_ME2L_DEDUP_KEY_COLUMNS = ("ME2L_Purchasing_Document", "ME2L_Item")
+
 
 def _pr2po_agg_column_expr(report: str, agg_col: str) -> str:
     """PR2PO-only: AVG/SUM/MIN/MAX over a numeric-but-VARCHAR column (same set as
@@ -458,7 +530,23 @@ def _pr2po_agg_column_expr(report: str, agg_col: str) -> str:
     the aggregate with 'Unexpected parameters (varchar)'."""
     if report == "PR2PO" and agg_col in _PR2PO_NUMERIC_COMPARISON_COLUMNS:
         return f"TRY_CAST({agg_col} AS INT)"
+    elif report == "ME2L" and agg_col in _ME2L_NUMERIC_AGGREGATE_COLUMNS:
+        return f"TRY_CAST({agg_col} AS DOUBLE)"
     return agg_col
+
+
+def _me2l_dedup_from_clause(where_sql: str, extra_select_cols) -> str:
+    """ME2L-only: the raw unified table has confirmed exact-duplicate rows per
+    line item (same PO+Item, every column identical) -- see PO 5400010477, which
+    returned 4 rows instead of 2. This wraps the table in a DISTINCT-on-natural-
+    key subquery, selecting only the line-item key columns plus whatever
+    value/group columns the calling aggregate actually needs, so duplicate
+    physical rows collapse to one before SUM/AVG/MIN/MAX runs. extra_select_cols
+    is an iterable of additional column names to carry through (the aggregate
+    column, and the group-by column(s) if grouped)."""
+    cols = list(_ME2L_DEDUP_KEY_COLUMNS) + [c for c in extra_select_cols if c not in _ME2L_DEDUP_KEY_COLUMNS]
+    select_list = ", ".join(cols)
+    return f"FROM (SELECT DISTINCT {select_list}\n    FROM {_qualified_table()}{where_sql}\n) AS me2l_dedup"
 
 
 def _filter_condition(col: str, key: str, value, report: Optional[str] = None) -> Optional[str]:
@@ -488,6 +576,28 @@ def _filter_condition(col: str, key: str, value, report: Optional[str] = None) -
                 col_sql = f"TRY_CAST({col} AS INT)"
             return f"{col_sql} {sql_op} {operand_sql}"
 
+    if report == "ME2L" and len(values) == 1:
+        match = _COMPARISON_OP_RE.match(str(values[0]))
+        if match:
+            op, raw_operand = match.groups()
+            operand = raw_operand.strip()
+            sql_op = "<>" if op == "!=" else op
+            try:
+                float(operand)
+                operand_sql = operand
+                is_numeric = True
+            except ValueError:
+                operand_sql = f"'{_quote(operand)}'"
+                is_numeric = False
+            col_sql = col
+            if (
+                is_numeric
+                and sql_op in _PR2PO_MAGNITUDE_OPS
+                and col in _ME2L_COMPARISON_COLUMNS
+            ):
+                col_sql = f"TRY_CAST({col} AS DOUBLE)"
+            return f"{col_sql} {sql_op} {operand_sql}"
+
     if key in FUZZY_MATCH_KEYS:
         clauses = [
             f"lower(CAST({col} AS varchar)) LIKE '%{_quote(v.lower())}%'"
@@ -503,11 +613,43 @@ def _filter_condition(col: str, key: str, value, report: Optional[str] = None) -
 
 def _resolve_filter_column(report: str, key: str) -> Optional[str]:
     key = GROUP_BY_KEY_ALIASES.get(str(key).strip().lower(), key)
+    # ME2L-only: the LLM sometimes emits "name_of_supplier" instead
+    # of the recognized semantic key "vendor_name" -- without this,
+    # the filter is silently dropped by build_where_clause() and the
+    # query would wrongly return unfiltered totals with no error.
+    # Confirmed live: PONTY CHADHA FOUNDATION vendor filter was lost
+    # this way. Scoped to ME2L only, does not touch the shared
+    # GROUP_BY_KEY_ALIASES dict used by every report.
+    if report == "ME2L" and str(key).strip().lower() == "name_of_supplier":
+        key = "vendor_name"
+    # ME2L-only: mirrors the name_of_supplier remap above -- the LLM/regex
+    # detection sometimes emits a raw Presto column name or a near-miss key
+    # instead of the recognized semantic key, causing "not a recognized
+    # grouping dimension" errors. Confirmed live: "PO-wise still to be
+    # delivered quantity" -> group_by_column "PO_Number" (raw column, not
+    # "po_number"); "each purchasing document type" -> "purchasing_document_type"
+    # (near-miss of the real key "purchasing_doc_type").
+    if report == "ME2L":
+        key_lower = str(key).strip().lower()
+        if key_lower == "purchasing_document_type":
+            key = "purchasing_doc_type"
+        elif key_lower == "po_material":
+            key = "material_code"
+        elif key_lower in ("po number", "po_number") and key != "po_number":
+            key = "po_number"
+        elif key_lower in ("po_material_description", "material_description"):
+            key = "material_desc"
+        elif key_lower == "po_material":
+            key = "material_code"
     col = sch.key_column(report, key)
     if col:
         return col
     if report == "PR2PO":
         extra = _PR2PO_EXTRA_FILTER_COLUMNS.get(str(key).strip().lower())
+        if extra:
+            return extra
+    elif report == "ME2L":
+        extra = _ME2L_EXTRA_FILTER_COLUMNS.get(str(key).strip().lower())
         if extra:
             return extra
     # fall back to a common column with the same name if it happens to exist there
@@ -586,6 +728,20 @@ def resolve_intent_date_range(intent: ExtractedIntent) -> ResolvedDateRange:
             default = current_fy_period()
         return ResolvedDateRange(default.as_tuple(), default.label, True)
 
+    # ME2L-only: default to the current financial year when the question
+    # gives no date/period at all, UNLESS it's a direct PO-number or
+    # PR-number lookup (that already identifies one exact record, which
+    # may be from any year, so it must never be date-restricted). Confirmed
+    # requirement, per business: "Show total net order value for material
+    # air cooler" (no date) -> current FY; "Show me details for PO
+    # 5400010477" (PO number given, no date) -> unfiltered, same as today.
+    if intent.report == "ME2L":
+        filters = intent.filters or {}
+        is_document_lookup = "po_number" in filters or "pr_number" in filters
+        if not is_document_lookup:
+            default = current_fy_period()
+            return ResolvedDateRange(default.as_tuple(), default.label, True)
+
     return ResolvedDateRange(None, None, False)
 
 
@@ -597,6 +753,34 @@ def build_where_clause(
     resolve_intent_date_range); pass one explicitly to reuse an already-resolved window."""
     conditions: List[str] = []
     for key, value in (intent.filters or {}).items():
+        # ME2L-only: normalize this one specific known LLM key mismatch
+        # here too (not just inside _resolve_filter_column()), so
+        # _filter_condition() below sees "vendor_name" and correctly
+        # applies fuzzy LIKE matching instead of falling back to an
+        # exact match that can never match real data (vendor names
+        # always carry a numeric ID prefix). Confirmed live: without
+        # this, the filter resolved to the right column but used exact
+        # match and returned null for a vendor that genuinely has data.
+        if intent.report == "ME2L" and str(key).strip().lower() == "name_of_supplier":
+            key = "vendor_name"
+        # ME2L-only: mirrors the name_of_supplier remap above -- see
+        # _resolve_filter_column() for the matching remap and rationale
+        # (raw Presto column name / near-miss key emitted instead of the
+        # recognized semantic key).
+        if intent.report == "ME2L":
+            key_lower = str(key).strip().lower()
+            if key_lower == "po_number" and str(key) != "po_number":
+                key = "po_number"
+            elif key_lower == "purchasing_document_type":
+                key = "purchasing_doc_type"
+            elif key_lower == "po_material":
+                key = "material_code"
+            elif key_lower in ("po_material_description", "material_description", "materialdescription"):
+                key = "material_desc"
+            elif key_lower in ("po_material", "material"):
+                key = "material_code"
+            elif key_lower in ("po number", "po_number") and key != "po_number":
+                key = "po_number"
         values = _filter_values(value)
         if not values:
             continue
@@ -649,6 +833,43 @@ def _build_trend_sql(from_sql: str, period_expr: str, metric_expr: str, metric_a
         "FROM periods\n"
         "WHERE period IS NOT NULL\n"
         "ORDER BY period"
+    )
+
+
+def _build_me2l_trend_sql(from_sql: str, period_expr: str, metric_expr: str, metric_alias: str, time_grain: str) -> str:
+    """ME2L-only variant of _build_trend_sql(): simple period + value
+    series only (no month-over-month comparison columns), per business
+    request. period_raw stays internal (used only for correct
+    chronological ORDER BY); the displayed period is formatted per
+    time_grain -- 'April 2026' for month, 'Q1 2026' for quarter, '2026'
+    for year. metric_alias is the caller-supplied, human-readable
+    metric name (e.g. 'net_order_value'), not the generic
+    'metric_value' the shared _build_trend_sql() uses -- also per
+    business request. Does NOT touch the shared _build_trend_sql()."""
+    indented_from = "\n".join("  " + line for line in from_sql.splitlines())
+    if time_grain == "quarter":
+        period_display_expr = (
+            "CONCAT('Q', CAST((((month(period_raw) - 4 + 12) % 12) / 3) + 1 AS VARCHAR), ' ', "
+            "CAST(CASE WHEN month(period_raw) >= 4 THEN year(period_raw) "
+            "ELSE year(period_raw) - 1 END AS VARCHAR))"
+        )
+    elif time_grain == "year":
+        period_display_expr = "CAST(year(period_raw) AS VARCHAR)"
+    else:
+        # month, or any other/unrecognized grain: keep existing behavior
+        period_display_expr = "date_format(period_raw, '%M %Y')"
+    return (
+        "WITH periods AS (\n"
+        f"  SELECT {period_expr} AS period_raw,\n"
+        f"         {metric_expr} AS {metric_alias}\n"
+        f"{indented_from}\n"
+        f"  GROUP BY {period_expr}\n"
+        ")\n"
+        f"SELECT {period_display_expr} AS period,\n"
+        f"       ROUND({metric_alias}, 2) AS {metric_alias}\n"
+        "FROM periods\n"
+        "WHERE period_raw IS NOT NULL\n"
+        "ORDER BY period_raw"
     )
 
 
@@ -738,15 +959,26 @@ def build_sql(
                     f"report '{intent.report}'"
                 )
             group_cols = _combined_group_columns(group_col, extra_group_columns)
-            select_cols = ", ".join(
-                f"{col} AS group_value_{idx}" for idx, col in enumerate(group_cols, start=1)
-            )
-            group_by = ", ".join(group_cols)
-            sql = (f"SELECT {select_cols}, {func}({agg_col_expr}) AS result\n"
-                   f"FROM {table}{where_sql}\n"
-                   f"GROUP BY {group_by}\nORDER BY result DESC")
+            if intent.report == "ME2L":
+                from_clause = _me2l_dedup_from_clause(where_sql, group_cols + [agg_col])
+                select_cols = ", ".join(f"{col} AS group_value_{idx}" for idx, col in enumerate(group_cols, start=1))
+                group_by = ", ".join(group_cols)
+                sql = (f"SELECT {select_cols}, {func}(TRY_CAST({agg_col} AS DOUBLE)) AS result\n"
+                       f"{from_clause}\nGROUP BY {group_by}\nORDER BY result DESC")
+            else:
+                select_cols = ", ".join(
+                    f"{col} AS group_value_{idx}" for idx, col in enumerate(group_cols, start=1)
+                )
+                group_by = ", ".join(group_cols)
+                sql = (f"SELECT {select_cols}, {func}({agg_col_expr}) AS result\n"
+                       f"FROM {table}{where_sql}\n"
+                       f"GROUP BY {group_by}\nORDER BY result DESC")
         else:
-            sql = f"SELECT {func}({agg_col_expr}) AS result\nFROM {table}{where_sql}"
+            if intent.report == "ME2L":
+                from_clause = _me2l_dedup_from_clause(where_sql, [agg_col])
+                sql = f"SELECT {func}(TRY_CAST({agg_col} AS DOUBLE)) AS result\n{from_clause}"
+            else:
+                sql = f"SELECT {func}({agg_col_expr}) AS result\nFROM {table}{where_sql}"
 
     elif op == "trend":
         if not intent.time_grain:
@@ -771,7 +1003,11 @@ def build_sql(
             distinct_semkey = intent.distinct_key or DEFAULT_DOC_KEY.get(intent.report, "po_number")
             distinct_col = _resolve_filter_column(intent.report, distinct_semkey) or "PO_Number"
             metric_expr, metric_alias = f"COUNT(DISTINCT {distinct_col})", "record_count"
-        sql = _build_trend_sql(f"FROM {table}{where_sql}", trunc_expr, metric_expr, metric_alias)
+        if intent.report == "ME2L":
+            me2l_metric_alias = agg_col.lower() if (intent.aggregate_function and intent.aggregate_column) else metric_alias
+            sql = _build_me2l_trend_sql(f"FROM {table}{where_sql}", trunc_expr, metric_expr, me2l_metric_alias, intent.time_grain)
+        else:
+            sql = _build_trend_sql(f"FROM {table}{where_sql}", trunc_expr, metric_expr, metric_alias)
 
     else:
         raise ValueError(f"Unsupported operation: {op}")

@@ -541,7 +541,7 @@ REPORT_COLUMNS = {   'GateEntry': [   'GTENTRY_Balanced_Quantity',
                     'ME2L_Total_Open_Value',
                     'ME2L_Validity_Period_End',
                     'ME2L_Validity_Period_Start'],
-        'Material_Doc_List': [   
+        'Material_Doc_List': [
                             'MTLST_Amt_in_Loc_Cur',
                             'MTLST_Base_Unit_of_Measure',
                             'MTLST_Batch',
@@ -789,11 +789,13 @@ KEY_COLUMNS = {
         'department': 'PO_Department_Name',
         'material_code': 'PO_Material',
         'material_desc': 'PO_Material_Description',
+        'material_group': 'ME2L_Material_Group',
         'plant': 'PO_Plant',
         'po_item': 'ME2L_Item',
         'po_number': 'ME2L_Purchasing_Document',
         'pr_item': 'ME2L_Pur_req_Item_no',
         'pr_number': 'ME2L_Purchase_req_no',
+        'purchasing_doc_type': 'Purchasing_Doc_Type',
         'purchasing_group': 'Purchasing_Group',
         'purchasing_org': 'Purch_Organization',
         'vendor_name': 'Name_of_Supplier'
