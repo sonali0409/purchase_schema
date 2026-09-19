@@ -937,9 +937,27 @@ _REPORT_DESCRIPTIONS = {
     "PR_release": "PR approval workflow: release status, rejection level, approver chain "
                   "(HOD/CFO/MD/Process Owner/VC Chairman), days to approve. Use for 'released/"
                   "unreleased/rejected/pending PR', 'PR approval cycle', 'rejected at level N'.",
-    "Vendor_PO_History": "Vendor + PO history combined view (VH_ prefix): PO/PR linkage, vendor, "
-                         "material, dates, quantities. Use for 'delay in material received', "
-                         "'delay in GRN', 'GRN details for PO', 'is GRN created for PO'.",
+    "Vendor_PO_History": (
+        "Vendor + PO history combined view (VH_ prefix): tracks purchase "
+        "orders and their GRN (Goods Receipt Note) status. "
+        "PO is PENDING when Mat_Doc is blank; GRN is CREATED when "
+        "Mat_Doc is filled. Use for: "
+        "'pending POs / POs without GRN', "
+        "'GRN status for PO', "
+        "'PO received or not', "
+        "'material/PO delay', 'delay in GRN creation', "
+        "'days to receive material', "
+        "'vendor wise POs', 'which vendor supplied what PO', "
+        "'material wise vendor', 'which vendor supplies material X', "
+        "'GRN quantity/amount for vendor', "
+        "'how many POs pending for plant X'. "
+        "Key columns: VH_PO_No (PO number), VH_Vendor_Name (vendor), "
+        "VH_Plant (plant), VH_Department (dept), VH_Material_Desc "
+        "(material), Mat_Doc (GRN doc — blank=pending), GRN_Date, "
+        "GRN_qty, GRN_Amount, Vendor_Delivery_Date (promised delivery), "
+        "Material_Delay_Days (delay = GRN_Date - Delivery_Date), "
+        "GRN_Days (days from PO to GRN)."
+    ),
     "Sap_Purchase": "Raw SAP purchase requisition data: requisitioner, PR processing status, "
                     "release info, org/plant/department. Use for 'who raised PR X', 'requisitioner "
                     "for PR', 'how many PR raised by <person>'.",
@@ -1898,6 +1916,93 @@ def _detect_me2l_aggregate(question: str):
     return agg_fn, agg_col
 
 
+# Vendor_PO_History-only (mirrors the ME2L aggregate safety net above): recall net for
+# "total GRN amount for vendor X"-style questions where the model recognizes
+# operation="aggregate"/"trend" but leaves aggregate_function/aggregate_column null.
+# Keyword -> function, first match wins.
+_VPH_AGGREGATE_FUNCTION_KEYWORDS = (
+    (re.compile(r"\b(?:total|sum|cumulative)\b", re.IGNORECASE), "SUM"),
+    (re.compile(r"\b(?:average|avg|mean)\b", re.IGNORECASE), "AVG"),
+    (re.compile(r"\b(?:maximum|max|highest|most|top)\b", re.IGNORECASE), "MAX"),
+    (re.compile(r"\b(?:minimum|min|lowest|least)\b", re.IGNORECASE), "MIN"),
+    (re.compile(r"\b(?:count|number\s+of|how\s+many)\b", re.IGNORECASE), "COUNT"),
+)
+
+# Vendor_PO_History-only (mirrors _ME2L_TOP_N_RE / _ME2L_TOP_N_DIMENSION_RULES): "top N
+# <dimension>" is a RANKING instruction (rank the top N vendors/materials/etc. by some
+# metric), not a MAX-function word.
+_VPH_TOP_N_RE = re.compile(r"\btop\s+(\d+)\b", re.IGNORECASE)
+_VPH_TOP_N_DIMENSION_RULES = (
+    (re.compile(r"\b(?:vendors?|suppliers?)\b", re.IGNORECASE), "vendor_name"),
+    (re.compile(r"\bmaterials?\b", re.IGNORECASE), "material_desc"),
+    (re.compile(r"\bplants?\b", re.IGNORECASE), "plant"),
+    (re.compile(r"\bdepartments?\b", re.IGNORECASE), "department"),
+)
+
+
+def _detect_vph_aggregate(question: str):
+    """Vendor_PO_History-only: return (aggregate_function, aggregate_column) detected
+    from the question text -- function from _VPH_AGGREGATE_FUNCTION_KEYWORDS, column
+    as the longest matching phrase from sql_builder.AGGREGATE_COLUMN_ALIASES
+    ["Vendor_PO_History"] (the alias PHRASE itself, which
+    sql_builder._resolve_aggregate_column() knows how to resolve)."""
+    q_lower = question.lower()
+    detected_fn = None
+    for pattern, fn in _VPH_AGGREGATE_FUNCTION_KEYWORDS:
+        if pattern.search(question):
+            detected_fn = fn
+            break
+
+    detected_col = None
+    aliases = sqb.AGGREGATE_COLUMN_ALIASES.get("Vendor_PO_History", {})
+    for phrase in sorted(aliases.keys(), key=len, reverse=True):
+        if re.search(r"\b" + re.escape(phrase) + r"\b", q_lower):
+            detected_col = phrase
+            break
+    return detected_fn, detected_col
+
+
+_VPH_FILTER_VALUE_DESCRIPTORS = {
+    "department", "dept", "plant", "vendor", "supplier",
+    "material", "status", "grn", "pending",
+}
+# Free-text name filters: a real vendor/material name can legitimately start or end
+# with a descriptor word ("Material Handling Systems"), so descriptor stripping is
+# never applied to these -- only the noise-value drop below.
+_VPH_FILTER_FREE_TEXT_KEYS = {"vendor_name", "material_desc"}
+
+
+def _normalize_vph_filter_values(filters: dict) -> dict:
+    """Vendor_PO_History-only: strip trailing/leading descriptor words from filter
+    values (e.g. 'admin dept' -> 'admin') and drop noise-only values."""
+    normalized = {}
+    for key, value in (filters or {}).items():
+        if isinstance(value, str) and value.strip():
+            cleaned = value.strip()
+            if key not in _VPH_FILTER_FREE_TEXT_KEYS:
+                tokens = value.split()
+                start = 0
+                while start < len(tokens) - 1 and re.sub(
+                    r"[^\w&]", "", tokens[start]
+                ).lower() in _VPH_FILTER_VALUE_DESCRIPTORS:
+                    start += 1
+                end = len(tokens)
+                while end > start + 1 and re.sub(
+                    r"[^\w&]", "", tokens[end - 1]
+                ).lower() in _VPH_FILTER_VALUE_DESCRIPTORS:
+                    end -= 1
+                cleaned = " ".join(tokens[start:end]).strip()
+            # Drop noise-only values
+            if cleaned.lower() in ("all", "any", "each", "every", "null", "none", "n/a", ""):
+                continue
+            normalized[key] = cleaned if cleaned else value
+        else:
+            if isinstance(value, str) and value.strip().lower() in ("null", "none", "n/a", ""):
+                continue
+            normalized[key] = value
+    return normalized
+
+
 # PR2PO-only (FIX #10 safety net): bare GRN wording with no explicit number -- e.g. "GRN
 # received", "GRN not received" -- that the LLM doesn't reliably turn into a grn_quantity
 # filter on its own even with the FIX #10 system-prompt instruction, and that FIX #3's
@@ -2080,6 +2185,34 @@ def _apply_deterministic_overrides(question: str, intent: ExtractedIntent) -> Ex
         ):
             requested_group_by = "pr_number"
 
+    # Vendor_PO_History-only: same pattern as the ME2L supplier-wise block
+    # above -- vendor/supplier, material, plant and department "-wise" /
+    # "by X" / "per X" phrasing feeds the SAME "requested_group_by and not
+    # current_group_by" logic below. (Gated on intent.report, like the ME2L
+    # blocks above, since effective_report isn't resolved until later.)
+    if intent.report == "Vendor_PO_History":
+        if re.search(
+            r"\b(?:vendor\s*[-\s]?wise|by\s+vendor|per\s+vendor|"
+            r"vendor\s+breakdown|supplier\s*[-\s]?wise|by\s+supplier)\b",
+            question, re.IGNORECASE,
+        ):
+            requested_group_by = "vendor_name"
+        elif re.search(
+            r"\b(?:material\s*[-\s]?wise|by\s+material|per\s+material)\b",
+            question, re.IGNORECASE,
+        ):
+            requested_group_by = "material_desc"
+        elif re.search(
+            r"\b(?:plant\s*[-\s]?wise|by\s+plant|per\s+plant)\b",
+            question, re.IGNORECASE,
+        ):
+            requested_group_by = "plant"
+        elif re.search(
+            r"\b(?:department\s*[-\s]?wise|by\s+department|dept\s*[-\s]?wise)\b",
+            question, re.IGNORECASE,
+        ):
+            requested_group_by = "department"
+
     current_group_by = intent.group_by_column
     if current_group_by:
         normalized_group_by = _GROUP_BY_KEY_ALIASES.get(str(current_group_by).strip().lower())
@@ -2139,6 +2272,24 @@ def _apply_deterministic_overrides(question: str, intent: ExtractedIntent) -> Ex
         # "n/a"/etc.) as group_by_column instead of an actual Python None.
         # Confirmed live: "Which materials have the highest pending delivery
         # quantity?" returned group_by_column: "null".
+        current_group = updates.get("group_by_column", intent.group_by_column)
+        if isinstance(current_group, str) and current_group.strip().lower() in (
+            "null", "none", "n/a", "na", "", "undefined",
+        ):
+            updates["group_by_column"] = None
+
+    # Vendor_PO_History-only: same "null"-string sanitization as the ME2L block above --
+    # the model sometimes returns the literal string "null" (or "none"/"n/a"/etc.) as
+    # date_phrase or group_by_column instead of an actual None. Placed here (not with the
+    # later effective_report blocks) so it runs before the date-phrase recall net below and
+    # before the VPH ranking/aggregate block reads group_by_column. Gated on intent.report
+    # like the ME2L block, since effective_report isn't resolved yet at this point.
+    if intent.report == "Vendor_PO_History":
+        current_date = updates.get("date_phrase", intent.date_phrase)
+        if isinstance(current_date, str) and current_date.strip().lower() in (
+            "null", "none", "n/a", "na", "", "undefined",
+        ):
+            updates["date_phrase"] = None
         current_group = updates.get("group_by_column", intent.group_by_column)
         if isinstance(current_group, str) and current_group.strip().lower() in (
             "null", "none", "n/a", "na", "", "undefined",
@@ -2492,6 +2643,84 @@ def _apply_deterministic_overrides(question: str, intent: ExtractedIntent) -> Ex
             if final_agg_col and not final_agg_fn:
                 updates["aggregate_function"] = "SUM"
 
+    # Vendor_PO_History-only (mirrors the ME2L aggregate block above): fill in
+    # aggregate_function/aggregate_column when the model recognized an "aggregate"
+    # or "trend" question but left them null -- see _detect_vph_aggregate. Never
+    # overrides a value the model (or an earlier override) already set. COUNT is
+    # deliberately not written back: sql_builder only supports SUM/AVG/MIN/MAX as an
+    # aggregate_function (counts are the count/group_by_count/trend-default paths).
+    if effective_report == "Vendor_PO_History":
+        effective_operation = updates.get("operation", intent.operation)
+        effective_agg_fn = updates.get("aggregate_function", intent.aggregate_function)
+        effective_agg_col = updates.get("aggregate_column", intent.aggregate_column)
+
+        # "top N <dimension>" is a ranking instruction, not a MAX-function word -- set
+        # group_by_column/limit from it and strip "top N" so the function-keyword
+        # detector below doesn't misread "top" as MAX.
+        vph_ranking_match = _VPH_TOP_N_RE.search(question)
+        vph_ranking_dimension = None
+        vph_question_for_agg = question
+        if vph_ranking_match:
+            for pattern, dim_key in _VPH_TOP_N_DIMENSION_RULES:
+                if pattern.search(question):
+                    vph_ranking_dimension = dim_key
+                    break
+            if vph_ranking_dimension:
+                current_group = updates.get("group_by_column", intent.group_by_column)
+                if not current_group:
+                    updates["group_by_column"] = vph_ranking_dimension
+                current_limit = updates.get("limit", intent.limit)
+                if not current_limit:
+                    updates["limit"] = int(vph_ranking_match.group(1))
+                vph_question_for_agg = _VPH_TOP_N_RE.sub("", question)
+        # "top"/"highest"/"largest"/"most" with NO explicit number: same ranking
+        # treatment, defaulting to 10 rows.
+        if not vph_ranking_match:
+            if re.search(r"\b(?:top|highest|largest|most)\b", question, re.IGNORECASE):
+                for pattern, dim_key in _VPH_TOP_N_DIMENSION_RULES:
+                    if pattern.search(question):
+                        current_group = updates.get("group_by_column", intent.group_by_column)
+                        if not current_group:
+                            updates["group_by_column"] = dim_key
+                        current_limit = updates.get("limit", intent.limit)
+                        if not current_limit:
+                            updates["limit"] = 10
+                        vph_question_for_agg = re.sub(
+                            r"\b(?:top|highest|largest|most)\b",
+                            "", question, flags=re.IGNORECASE
+                        )
+                        break
+
+        if effective_operation in ("aggregate", "trend") and (
+            not effective_agg_fn or not effective_agg_col
+        ):
+            detected_fn, detected_col = _detect_vph_aggregate(vph_question_for_agg)
+            if detected_fn and detected_fn != "COUNT" and not effective_agg_fn:
+                updates["aggregate_function"] = detected_fn
+            if detected_col and not effective_agg_col:
+                updates["aggregate_column"] = detected_col
+        # SUM default for trend with a metric column but no function word
+        if effective_operation == "trend":
+            final_fn = updates.get("aggregate_function", effective_agg_fn)
+            final_col = updates.get("aggregate_column", effective_agg_col)
+            if final_col and not final_fn:
+                updates["aggregate_function"] = "SUM"
+        # Ranking SUM default: "top 10 vendors by GRN amount" means by TOTAL, not by a
+        # single line's max. Only fires when a ranking dimension was detected above.
+        if effective_operation == "aggregate" and vph_ranking_dimension:
+            final_fn = updates.get("aggregate_function", effective_agg_fn)
+            final_col = updates.get("aggregate_column", effective_agg_col)
+            if final_col and not final_fn:
+                updates["aggregate_function"] = "SUM"
+        # Plain-aggregate SUM default: "show total GRN amount for vendor X" often has no
+        # function word at all. Mirrors the trend/ranking defaults above; the
+        # ranking-dimension check keeps it from double-firing.
+        if effective_operation == "aggregate" and not vph_ranking_dimension:
+            final_fn = updates.get("aggregate_function", effective_agg_fn)
+            final_col = updates.get("aggregate_column", effective_agg_col)
+            if final_col and not final_fn:
+                updates["aggregate_function"] = "SUM"
+
     # ME2L-only: material_desc/material_code are extremely high-cardinality
     # group-by dimensions -- see _ME2L_HIGH_CARDINALITY_GROUP_BY_COLUMNS above
     # for the full rationale. Runs after all group_by_column resolution above
@@ -2574,6 +2803,14 @@ def _apply_deterministic_overrides(question: str, intent: ExtractedIntent) -> Ex
         normalized_filters = _normalize_me2l_filter_values(current_filters)
         if normalized_filters != current_filters:
             updates["filters"] = normalized_filters
+
+    # Vendor_PO_History-only: trim descriptor words off filter values and drop
+    # noise-only values -- see _normalize_vph_filter_values.
+    if effective_report == "Vendor_PO_History":
+        current_filters = updates.get("filters", intent.filters)
+        normalized = _normalize_vph_filter_values(current_filters)
+        if normalized != current_filters:
+            updates["filters"] = normalized
 
     # ME2L-only (Q71): targeted correction for "which suppliers have the
     # highest pending invoice value" style questions -- the model has been
