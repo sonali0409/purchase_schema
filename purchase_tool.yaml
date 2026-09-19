@@ -1,0 +1,91 @@
+openapi: 3.0.3
+
+info:
+  title: Purchase Analytics Tool
+  description: >
+    Purchase analytics API for The Wave Group.
+    Accepts a natural-language Purchase question, retrieves the actual
+    Purchase data, and automatically generates a dashboard/graph URL
+    when applicable.
+  version: 1.0.0
+
+servers:
+  - url: https://0ghgd9dc-8000.inc1.devtunnels.ms/
+paths:
+  /chat:
+    post:
+      operationId: purchaseAnalytics
+      summary: Answer a Purchase analytics question
+      description: >
+        Answers a natural-language Purchase question using the Purchase
+        data system. The API retrieves the actual data and automatically
+        generates a dashboard using the same returned data. If a dashboard
+        is generated, the response contains graph.generated=true and
+        graph.graph_url.
+
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - question
+              properties:
+                question:
+                  type: string
+                  description: >
+                    Natural-language Purchase analytics question.
+                    Example: Show vendor-wise PO count for last month.
+                  example: Show vendor-wise PO count for last month
+
+      responses:
+        "200":
+          description: Purchase analytics response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  question:
+                    type: string
+
+                  report:
+                    type: string
+
+                  sql:
+                    type: string
+
+                  resolved_date_range:
+                    type: string
+
+                  resolved_date_label:
+                    type: string
+
+                  date_range_defaulted:
+                    type: boolean
+
+                  columns:
+                    type: array
+                    items:
+                      type: string
+
+                  rows:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: true
+
+                  row_count:
+                    type: integer
+
+                  graph:
+                    type: object
+                    nullable: true
+                    additionalProperties: true
+
+        "400":
+          description: Invalid Purchase request
+
+        "500":
+          description: Purchase processing error

@@ -5,3 +5,4 @@ requests
 presto-python-client
 python-dateutil
 ibm_watsonx_ai
+ibm-cos-sdk
