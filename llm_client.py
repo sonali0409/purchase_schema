@@ -42,7 +42,8 @@ from config import settings
 WATSONX_URL = settings.WX_URL
 WATSONX_API_KEY = settings.WX_API_KEY
 WATSONX_PROJECT_ID = settings.WX_PROJECT_ID
-MODEL_ID = "meta-llama/llama-3-3-70b-instruct"
+MODEL_ID = settings.WX_MODEL_ID
+IAM_TOKEN_URL = settings.WX_IAM_TOKEN_URL
 API_VERSION = "2024-05-31"
 
 _token_cache = {"token": None, "expires_at": 0}
@@ -51,7 +52,7 @@ def _get_iam_token() -> str:
     if _token_cache["token"] and time.time() < _token_cache["expires_at"] - 60:
         return _token_cache["token"]
     resp = requests.post(
-        "https://iam.cloud.ibm.com/identity/token",
+        settings.WX_IAM_TOKEN_URL,
         data={
             "grant_type": "urn:ibm:params:oauth:grant-type:apikey",
             "apikey": WATSONX_API_KEY,
