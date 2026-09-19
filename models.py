@@ -58,7 +58,12 @@ class ExtractedIntent(BaseModel):
         None,
         description="If the question is too ambiguous to answer, explain what's missing",
     )
-
+    date_type: Optional[str] = Field(
+        None, description="PR2PO ONLY: which of PR2PO's date columns a date_phrase should "
+                          "filter on -- 'created' (P2P_Created_On, the default), "
+                          "'delivery' (P2P_Delivery_Date), or 'modified' (P2P_Last_Changed_On). "
+                          "Ignored for every other report."
+    )
     kpi_id: Optional[str] = Field(
         None,
         description="Set ONLY when the question matches one of the fixed KPI calculations "
