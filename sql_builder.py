@@ -144,6 +144,18 @@ AGGREGATE_COLUMN_ALIASES = {
         "qty": "GRN_qty",
         "delay days": "Material_Delay_Days",
         "delay_days": "Material_Delay_Days",
+        # Additive VPH phrases (existing entries above are unchanged; "net value" and
+        # "delay days" were already defined above, so they are intentionally not repeated).
+        "grn quantity": "GRN_qty",
+        "grn amount": "GRN_Amount",
+        "grn qty": "GRN_qty",
+        "po quantity": "VH_PO_Qty",
+        "po qty": "VH_PO_Qty",
+        "net price": "VH_Net_Price",
+        "material delay": "Material_Delay_Days",
+        "grn days": "GRN_Days",
+        "days to grn": "GRN_Days",
+        "pending days": "Material_Delay_Days",
     },
     "SES": {
         "amount": "SES_Amount",
@@ -295,6 +307,15 @@ _ME2L_NUMERIC_AGGREGATE_COLUMNS = {
 # before aggregating, so SUM/AVG/MIN/MAX don't double-count the physical copies.
 _ME2L_DEDUP_KEY_COLUMNS = ("ME2L_Purchasing_Document", "ME2L_Item")
 
+# Vendor_PO_History-only: these GRN/PO numeric columns are stored as VARCHAR in the
+# underlying view, so SUM/AVG/MIN/MAX needs an explicit cast (see _pr2po_agg_column_expr),
+# or Presto/Trino rejects the aggregate with 'Unexpected parameters (varchar)'.
+_VPH_NUMERIC_AGGREGATE_COLUMNS = {
+    "GRN_qty", "GRN_Amount", "VH_PO_Qty", "VH_Net_Price",
+    "Material_Delay_Days", "GRN_Days",
+    "GRN_Net_Value", "GRN_Gross_Value",
+}
+
 
 def _pr2po_agg_column_expr(report: str, agg_col: str) -> str:
     """PR2PO-only: AVG/SUM/MIN/MAX over a numeric-but-VARCHAR column (same set as
@@ -303,6 +324,8 @@ def _pr2po_agg_column_expr(report: str, agg_col: str) -> str:
     if report == "PR2PO" and agg_col in _PR2PO_NUMERIC_COMPARISON_COLUMNS:
         return f"TRY_CAST({agg_col} AS INT)"
     elif report == "ME2L" and agg_col in _ME2L_NUMERIC_AGGREGATE_COLUMNS:
+        return f"TRY_CAST({agg_col} AS DOUBLE)"
+    elif report == "Vendor_PO_History" and agg_col in _VPH_NUMERIC_AGGREGATE_COLUMNS:
         return f"TRY_CAST({agg_col} AS DOUBLE)"
     return agg_col
 
@@ -432,6 +455,24 @@ def _resolve_filter_column(report: str, key: str) -> Optional[str]:
             key = "material_desc"
         elif key_lower == "po_material":
             key = "material_code"
+    # Vendor_PO_History-only: mirrors the ME2L remap above -- the LLM sometimes
+    # emits a raw VH_ column name or a near-miss key instead of the recognized
+    # semantic key, which would otherwise fail as "not a recognized grouping
+    # dimension" (or be silently dropped as a filter).
+    if report == "Vendor_PO_History":
+        key_lower = str(key).strip().lower()
+        if key_lower in ("vh_vendor_name", "vendor"):
+            key = "vendor_name"
+        elif key_lower in ("vh_po_no", "po_no"):
+            key = "po_number"
+        elif key_lower in ("vh_material_desc", "material_description"):
+            key = "material_desc"
+        elif key_lower in ("vh_plant",):
+            key = "plant"
+        elif key_lower in ("vh_department", "dept"):
+            key = "department"
+        elif key_lower == "name_of_supplier":
+            key = "vendor_name"
     col = sch.key_column(report, key)
     if col:
         return col
@@ -538,6 +579,37 @@ def resolve_intent_date_range(intent: ExtractedIntent) -> ResolvedDateRange:
             default = current_fy_period()
             return ResolvedDateRange(default.as_tuple(), default.label, True)
 
+    # Vendor_PO_History-only: for count/aggregate questions that give no date at
+    # all, default to the CURRENT QUARTER (India FY: Apr-Jun, Jul-Sep, Oct-Dec,
+    # Jan-Mar) -- confirmed business rule, deliberately narrower than ME2L's
+    # current-FY default. Same exemption as ME2L: a direct PO-number/PR-number
+    # lookup identifies one exact record from any period and is never
+    # date-restricted; list-style questions and trends (handled above) are also
+    # left alone. date_resolver has no current-quarter helper imported here, so
+    # the quarter is derived from today's date directly.
+    if intent.report == "Vendor_PO_History" and intent.operation in (
+        "count", "count_distinct", "group_by_count", "aggregate"
+    ):
+        filters = intent.filters or {}
+        # Also recognize the raw-column / near-miss spellings the LLM sometimes emits
+        # for the PO/PR filter key (build_where_clause normalizes these later).
+        is_document_lookup = any(
+            str(k).strip().lower() in ("po_number", "pr_number", "vh_po_no", "po_no",
+                                       "vh_pr_no", "pr_no")
+            for k in filters
+        )
+        if not is_document_lookup:
+            today = date.today()
+            if 4 <= today.month <= 6:
+                q_start, q_end = date(today.year, 4, 1), date(today.year, 6, 30)
+            elif 7 <= today.month <= 9:
+                q_start, q_end = date(today.year, 7, 1), date(today.year, 9, 30)
+            elif 10 <= today.month <= 12:
+                q_start, q_end = date(today.year, 10, 1), date(today.year, 12, 31)
+            else:  # Jan-Mar
+                q_start, q_end = date(today.year, 1, 1), date(today.year, 3, 31)
+            return ResolvedDateRange((q_start, q_end), "Current Quarter", True)
+
     return ResolvedDateRange(None, None, False)
 
 
@@ -577,6 +649,29 @@ def build_where_clause(
                 key = "material_code"
             elif key_lower in ("po number", "po_number") and key != "po_number":
                 key = "po_number"
+        # Vendor_PO_History-only: normalize raw VH_ column names / near-miss keys to
+        # the recognized semantic keys here too, so _filter_condition() below sees
+        # e.g. "vendor_name" and applies fuzzy LIKE matching -- see
+        # _resolve_filter_column() for the matching remap.
+        if intent.report == "Vendor_PO_History":
+            key_lower = str(key).strip().lower()
+            if key_lower in ("vh_vendor_name", "vendor_name", "vendor"):
+                key = "vendor_name"
+            elif key_lower in ("vh_po_no", "po_no", "po_number"):
+                key = "po_number"
+            elif key_lower in ("vh_pr_no", "pr_no", "pr_number"):
+                key = "pr_number"
+            elif key_lower in ("vh_material_desc", "material_desc",
+                               "material_description", "material"):
+                key = "material_desc"
+            elif key_lower in ("vh_material", "material_code"):
+                key = "material_code"
+            elif key_lower in ("vh_plant", "plant"):
+                key = "plant"
+            elif key_lower in ("vh_department", "department", "dept"):
+                key = "department"
+            elif key_lower == "name_of_supplier":
+                key = "vendor_name"
         values = _filter_values(value)
         if not values:
             continue
@@ -845,7 +940,40 @@ _KPI_PO_RELEASE_DIMS = {"plant": "POR_Plant_Code", "po_number": "POR_PO","po_del
 _KPI_MATDOC_DIMS = {"plant": "MTLST_Plant", "po_number": "MTLST_Purchase_Order",
                     "vendor_name": "MTLST_Supplier", "material_code": "MTLST_Material"}
 _KPI_GATEENTRY_DIMS = {"vendor_name": "GTENTRY_Supplier_Name", "material_code": "GTENTRY_Material"}
-_KPI_SAP_PURCHASE_DIMS = {"plant": "PR_Plant", "department": "PR_Department", "pr_number": "SAP_Purchase_Requisition","requisitioner": "Requisitioner", "company_code": "Company_Code","pr_deletion_indicator": "PR_Deletion_Indicator", "pr_processing_status": "PR_Processing_Status", "created_by": "PR_Created_By", "purchasing_group": "SAP_Purchasing_Group", "creation_indicator": "SAP_Creation_Indicator"}
+_KPI_SAP_PURCHASE_DIMS = {"plant": "PR_Plant", "department": "PR_Department", "pr_number": "SAP_Purchase_Requisition","requisitioner": "Requisitioner", "company_code": "Company_Code","pr_deletion_indicator": "PR_Deletion_Indicator", "pr_processing_status": "PR_Processing_Status"}
+# Vendor_PO_History-only: KPI filter dimensions -> real VH_ columns (the VPH KPIs used to
+# borrow _KPI_MATDOC_DIMS, which are Material_Doc_List's MTLST_ columns).
+_KPI_VPH_DIMS = {
+    "plant": "VH_Plant",
+    "department": "VH_Department",
+    "vendor_name": "VH_Vendor_Name",
+    "material_desc": "VH_Material_Desc",
+    "material_code": "VH_Material",
+    "po_number": "VH_PO_No",
+    "pr_number": "VH_PR_No",
+}
+# Vendor_PO_History-only KPI count/distinct-key columns. The shared _KPI_COUNT_COLUMNS /
+# _KPI_DISTINCT_KEY_COLUMNS / _KPI_DATE_REPORT / _KPI_DIMENSION_COLUMNS entries for the
+# VPH KPI ids still point at ME2L / Material_Doc_List columns and are left untouched;
+# _kpi_count_sql / _kpi_trend_sql / _kpi_group_column apply these instead, but only
+# for KPIs registered under "Vendor_PO_History".
+_KPI_VPH_COUNT_COLUMNS = {
+    "po-pending": "VH_PO_No",
+    "po-release": "VH_PO_No",
+    "po-status-grn": "VH_PO_No",
+    "material-po-delay": "VH_PO_No",
+    "delay-in-grn": "VH_PO_No",
+    "vendor-wise-po-vph": "VH_PO_No",
+    "material-wise-vendor-vph": "VH_Vendor_Name",
+}
+_KPI_VPH_DISTINCT_KEY_COLUMNS = {
+    "po_number": "VH_PO_No",
+    "pr_number": "VH_PR_No",
+}
+
+
+def _kpi_is_vph(kpi_id: str) -> bool:
+    return KPI_REGISTRY.get(kpi_id, (None,))[0] == "Vendor_PO_History"
 
 _KPI_COUNT_COLUMNS = {
     "pr-created": "PR_Number",
@@ -1074,56 +1202,56 @@ def kpi_po_approval_delay_level_wise(filters, date_range):
 
 
 def kpi_po_pending(filters, date_range):
-    conds = _kpi_dim_conditions(filters, _KPI_MATDOC_DIMS)
-    conds.append("PO_Number IS NOT NULL")
+    conds = _kpi_dim_conditions(filters, _KPI_VPH_DIMS)
+    conds.append("VH_PO_No IS NOT NULL")
     conds.append("(Mat_Doc IS NULL OR CAST(Mat_Doc AS varchar) = '')")
-    dc = _kpi_date_condition(sch.date_filter_column("Material_Doc_List"), date_range)
+    dc = _kpi_date_condition(sch.date_filter_column("Vendor_PO_History"), date_range)
     if dc:
         conds.append(dc)
-    return (f"SELECT PO_Number, MTLST_Purchase_Order, MTLST_Plant, MTLST_Supplier, Mat_Doc\n"
+    return (f"SELECT VH_PO_No, VH_Vendor_Name, VH_Plant, VH_Department, VH_Material_Desc, "
+            f"Mat_Doc, VH_PO_Date\n"
             f"FROM {_qualified_table()}{_kpi_where(conds)}\n"
-            f"ORDER BY MTLST_Posting_Date DESC\nLIMIT 500")
+            f"ORDER BY VH_PO_Date DESC\nLIMIT 500")
 
 def kpi_po_release(filters, date_range):
-    conds = _kpi_dim_conditions(filters, _KPI_MATDOC_DIMS)
-    conds.append("PO_Number IS NOT NULL")
+    conds = _kpi_dim_conditions(filters, _KPI_VPH_DIMS)
+    conds.append("VH_PO_No IS NOT NULL")
     conds.append("(Mat_Doc IS NOT NULL AND CAST(Mat_Doc AS varchar) != '')")
-    dc = _kpi_date_condition(sch.date_filter_column("Material_Doc_List"), date_range)
+    dc = _kpi_date_condition(sch.date_filter_column("Vendor_PO_History"), date_range)
     if dc:
         conds.append(dc)
-    return (f"SELECT PO_Number, MTLST_Purchase_Order, MTLST_Plant, MTLST_Supplier, Mat_Doc\n"
+    return (f"SELECT VH_PO_No, VH_Vendor_Name, VH_Plant, VH_Department, VH_Material_Desc, "
+            f"Mat_Doc, GRN_Date, GRN_qty, GRN_Amount\n"
             f"FROM {_qualified_table()}{_kpi_where(conds)}\n"
-            f"ORDER BY MTLST_Posting_Date DESC\nLIMIT 500")
+            f"ORDER BY VH_PO_Date DESC\nLIMIT 500")
 
 
 def kpi_po_status_grn(filters, date_range):
-    conds = _kpi_dim_conditions(filters, _KPI_MATDOC_DIMS)
-    dc = _kpi_date_condition(sch.date_filter_column("Material_Doc_List"), date_range)
+    conds = _kpi_dim_conditions(filters, _KPI_VPH_DIMS)
+    dc = _kpi_date_condition(sch.date_filter_column("Vendor_PO_History"), date_range)
     if dc:
         conds.append(dc)
     return (
-        "SELECT MTLST_Purchase_Order, Mat_Doc,\n"
+        "SELECT VH_PO_No, VH_Vendor_Name, Mat_Doc,\n"
         "       CASE WHEN Mat_Doc IS NOT NULL AND CAST(Mat_Doc AS varchar) != '' "
         "THEN 'GRN Created' ELSE 'GRN Not Created' END AS grn_status\n"
         f"FROM {_qualified_table()}{_kpi_where(conds)}\n"
-        f"ORDER BY MTLST_Posting_Date DESC\nLIMIT 500"
+        f"ORDER BY VH_PO_Date DESC\nLIMIT 500"
     )
 
 
 def kpi_material_po_delay(filters, date_range):
-    conds = _kpi_dim_conditions(filters, _KPI_MATDOC_DIMS)
-    dc = _kpi_date_condition(sch.date_filter_column("Material_Doc_List"), date_range)
+    conds = _kpi_dim_conditions(filters, _KPI_VPH_DIMS)
+    dc = _kpi_date_condition(sch.date_filter_column("Vendor_PO_History"), date_range)
     if dc:
         conds.append(dc)
     return (
-        "SELECT PO_Number, MTLST_Purchase_Order, Mat_Doc,\n"
+        "SELECT VH_PO_No, VH_Vendor_Name, VH_Material_Desc, Mat_Doc,\n"
         "       CASE WHEN Mat_Doc IS NULL OR CAST(Mat_Doc AS varchar) = '' "
         "THEN true ELSE false END AS is_pending,\n"
-        "       GRN_Date, Vendor_Delivery_Date,\n"
-        "       date_diff('day', TRY(date_parse(CAST(Vendor_Delivery_Date AS VARCHAR), '%Y%m%d')), "
-        "TRY(date_parse(CAST(GRN_Date AS VARCHAR), '%Y%m%d'))) AS delay_days\n"
+        "       GRN_Date, Vendor_Delivery_Date, Material_Delay_Days, GRN_Days\n"
         f"FROM {_qualified_table()}{_kpi_where(conds)}\n"
-        f"ORDER BY MTLST_Posting_Date DESC\nLIMIT 500"
+        f"ORDER BY TRY_CAST(Material_Delay_Days AS DOUBLE) DESC\nLIMIT 500"
     )
 
 
@@ -1148,13 +1276,34 @@ def kpi_material_wise_vendor(filters, date_range):
 
 
 def kpi_delay_in_grn(filters, date_range):
-    conds = _kpi_dim_conditions(filters, _KPI_MATDOC_DIMS)
-    dc = _kpi_date_condition(sch.date_filter_column("Material_Doc_List"), date_range)
+    conds = _kpi_dim_conditions(filters, _KPI_VPH_DIMS)
+    dc = _kpi_date_condition(sch.date_filter_column("Vendor_PO_History"), date_range)
     if dc:
         conds.append(dc)
-    return (f"SELECT MTLST_Purchase_Order, MTLST_Supplier, Material_Delay_Days\n"
+    return (f"SELECT VH_PO_No, VH_Vendor_Name, VH_Material_Desc, Material_Delay_Days, "
+            f"GRN_Days, GRN_Date, Vendor_Delivery_Date\n"
             f"FROM {_qualified_table()}{_kpi_where(conds)}\n"
-            f"ORDER BY Material_Delay_Days DESC\nLIMIT 500")
+            f"ORDER BY TRY_CAST(Material_Delay_Days AS DOUBLE) DESC\nLIMIT 500")
+
+
+def kpi_vendor_wise_po_vph(filters, date_range):
+    conds = _kpi_dim_conditions(filters, _KPI_VPH_DIMS)
+    dc = _kpi_date_condition(sch.date_filter_column("Vendor_PO_History"), date_range)
+    if dc:
+        conds.append(dc)
+    return (f"SELECT VH_Vendor_Name, VH_PO_No, VH_Material_Desc, VH_PO_Date, Mat_Doc\n"
+            f"FROM {_qualified_table()}{_kpi_where(conds)}\n"
+            f"ORDER BY VH_Vendor_Name\nLIMIT 500")
+
+
+def kpi_material_wise_vendor_vph(filters, date_range):
+    conds = _kpi_dim_conditions(filters, _KPI_VPH_DIMS)
+    dc = _kpi_date_condition(sch.date_filter_column("Vendor_PO_History"), date_range)
+    if dc:
+        conds.append(dc)
+    return (f"SELECT VH_Material_Desc, VH_Vendor_Name, VH_PO_No, GRN_qty, GRN_Amount\n"
+            f"FROM {_qualified_table()}{_kpi_where(conds)}\n"
+            f"ORDER BY VH_Material_Desc\nLIMIT 500")
 
 
 def kpi_gate_entry_daily(filters, date_range):
@@ -1228,6 +1377,10 @@ KPI_REGISTRY = {
     "vendor-wise-po": ("ME2L", kpi_vendor_wise_po, "PO numbers per vendor"),
     "material-wise-vendor": ("ME2L", kpi_material_wise_vendor, "Vendor per material"),
     "delay-in-grn": ("Vendor_PO_History", kpi_delay_in_grn, "Material_Delay_Days per PO"),
+    "vendor-wise-po-vph": ("Vendor_PO_History", kpi_vendor_wise_po_vph,
+                           "Vendor name against PO numbers"),
+    "material-wise-vendor-vph": ("Vendor_PO_History", kpi_material_wise_vendor_vph,
+                                 "Material name against vendor name"),
     "gate-entry-daily": ("GateEntry", kpi_gate_entry_daily, "Gate entry count per day"),
     "gate-entry-with-po": ("GateEntry", kpi_gate_entry_with_po, "Gate entries linked to a PO"),
     "gate-entry-without-po": ("GateEntry", kpi_gate_entry_without_po,
@@ -1293,6 +1446,9 @@ def _kpi_count_sql(
     if operation == "count_distinct":
         count_col = _KPI_DISTINCT_KEY_COLUMNS.get(distinct_key or "")
         count_col = count_col or _KPI_COUNT_COLUMNS.get(kpi_id)
+        if _kpi_is_vph(kpi_id):
+            count_col = (_KPI_VPH_DISTINCT_KEY_COLUMNS.get(distinct_key or "")
+                         or _KPI_VPH_COUNT_COLUMNS.get(kpi_id))
         if not count_col:
             raise ValueError(f"No count column configured for KPI '{kpi_id}'")
         select_expr = f"COUNT(DISTINCT {count_col})"
@@ -1309,6 +1465,8 @@ def _kpi_count_sql(
 def _kpi_group_column(kpi_id: str, group_by_column: str) -> str:
     normalized_key = GROUP_BY_KEY_ALIASES.get(str(group_by_column).strip().lower(), group_by_column)
     colmap = _KPI_DIMENSION_COLUMNS.get(kpi_id, {})
+    if _kpi_is_vph(kpi_id):
+        colmap = _KPI_VPH_DIMS
     group_col = colmap.get(normalized_key)
     if not group_col:
         report = KPI_REGISTRY.get(kpi_id, (None,))[0]
@@ -1362,10 +1520,15 @@ def _kpi_trend_sql(
 
     count_col = _KPI_DISTINCT_KEY_COLUMNS.get(distinct_key or "")
     count_col = count_col or _KPI_COUNT_COLUMNS.get(kpi_id)
+    if _kpi_is_vph(kpi_id):
+        count_col = (_KPI_VPH_DISTINCT_KEY_COLUMNS.get(distinct_key or "")
+                     or _KPI_VPH_COUNT_COLUMNS.get(kpi_id))
     if not count_col:
         raise ValueError(f"No count column configured for KPI '{kpi_id}'")
 
     date_col = sch.date_filter_column(_KPI_DATE_REPORT.get(kpi_id, report))
+    if _kpi_is_vph(kpi_id):
+        date_col = sch.date_filter_column("Vendor_PO_History")
     period_expr = time_grain_trunc_expr(date_col, time_grain)
     from_sql = _kpi_from_sql(kpi_id, detail_sql)
 
