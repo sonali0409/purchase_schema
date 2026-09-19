@@ -14,11 +14,12 @@ class Settings:
 
     # --- LLM (Anthropic) for intent/entity extraction ---
     WX_URL: str = os.getenv("WX_URL",)
-    LLM_MODEL_ID: str = os.getenv("WX_MODEL_ID",)
+    WX_MODEL_ID: str = os.getenv("WX_MODEL_ID",)
     WX_API_KEY: str = os.getenv("WX_API_KEY",)  
     WX_PROJECT_ID: str = os.getenv("WX_PROJECT_ID",)
     WX_TEMPERATURE: float = float(os.getenv("WX_TEMPERATURE", "0.4"))
     WX_MAX_TOKENS: int = int(os.getenv("WX_MAX_TOKENS", "3000"))
+    WX_IAM_TOKEN_URL: str = os.getenv("WX_IAM_TOKEN_URL",)
 
     # --- App behavior ---
     MAX_ROWS: int = int(os.getenv("MAX_ROWS", "500"))
