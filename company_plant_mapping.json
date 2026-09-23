@@ -1,0 +1,364 @@
+{
+  "companies": {
+    "1000": {
+      "description": "Uppal Chadha Hi-tech Developers Pvt Ltd.",
+      "aliases": [
+        "Uppal Chadha Hi-tech Developers Pvt Ltd."
+      ]
+    },
+    "1100": {
+      "description": "wave MegaCity Center Pvt Ltd",
+      "aliases": [
+        "wave MegaCity Center Pvt Ltd"
+      ]
+    },
+    "1300": {
+      "description": "Country Coloniser Pvt Ltd",
+      "aliases": [
+        "Country Coloniser Pvt Ltd"
+      ]
+    },
+    "1500": {
+      "description": "Wave Vertica Pvt. Ltd",
+      "aliases": [
+        "Wave Vertica Pvt. Ltd"
+      ]
+    },
+    "3000": {
+      "description": "Wave Industries Pvt Ltd",
+      "aliases": [
+        "Wave Industries Pvt Ltd"
+      ]
+    },
+    "3100": {
+      "description": "WI Green Ventures LLP",
+      "aliases": [
+        "WI Green Ventures LLP"
+      ]
+    },
+    "3200": {
+      "description": "Wave Agro private limited",
+      "aliases": [
+        "Wave Agro private limited"
+      ]
+    },
+    "3300": {
+      "description": "WI Ventures Private Ltd",
+      "aliases": [
+        "WI Ventures Private Ltd"
+      ]
+    },
+    "5000": {
+      "description": "Infra 13 Pvt Ltd",
+      "aliases": [
+        "Infra 13 Pvt Ltd"
+      ]
+    },
+    "6000": {
+      "description": "Wave Infratrade Pvt Ltd",
+      "aliases": [
+        "Wave Infratrade Pvt Ltd"
+      ]
+    },
+    "7000": {
+      "description": "Wave Premier Sports Pvt Ltd",
+      "aliases": [
+        "Wave Premier Sports Pvt Ltd"
+      ]
+    },
+    "1200": {
+      "description": "",
+      "aliases": []
+    },
+    "1400": {
+      "description": "",
+      "aliases": []
+    }
+  },
+  "plants": {
+    "1000": {
+      "description": "CORPORATE OFFICE",
+      "company_code": "1000",
+      "aliases": [
+        "CORPORATE OFFICE"
+      ]
+    },
+    "1001": {
+      "description": "NH 24",
+      "company_code": "1000",
+      "aliases": [
+        "NH 24"
+      ]
+    },
+    "1002": {
+      "description": "METRO",
+      "company_code": "1000",
+      "aliases": [
+        "METRO"
+      ]
+    },
+    "1100": {
+      "description": "CORPORATE OFFICE",
+      "company_code": "1100",
+      "aliases": [
+        "CORPORATE OFFICE"
+      ]
+    },
+    "1101": {
+      "description": "WMCC SECTOR 25",
+      "company_code": "1100",
+      "aliases": [
+        "WMCC SECTOR 25"
+      ]
+    },
+    "1102": {
+      "description": "WMCC - SECTOR 32",
+      "company_code": "1100",
+      "aliases": [
+        "WMCC - SECTOR 32"
+      ]
+    },
+    "1300": {
+      "description": "CORPORATE OFFICE",
+      "company_code": "1300",
+      "aliases": [
+        "CORPORATE OFFICE"
+      ]
+    },
+    "1301": {
+      "description": "CCPL - MOHALI",
+      "company_code": "1300",
+      "aliases": [
+        "CCPL - MOHALI"
+      ]
+    },
+    "1500": {
+      "description": "CORPORATE OFFICE",
+      "company_code": "1500",
+      "aliases": [
+        "CORPORATE OFFICE"
+      ]
+    },
+    "1501": {
+      "description": "SECTOR 18",
+      "company_code": "1500",
+      "aliases": [
+        "SECTOR 18"
+      ]
+    },
+    "3000": {
+      "description": "WAVE INDUSTRIES HO",
+      "company_code": "3000",
+      "aliases": [
+        "WAVE INDUSTRIES HO"
+      ]
+    },
+    "3001": {
+      "description": "WIPL DHANAURA",
+      "company_code": "3000",
+      "aliases": [
+        "WIPL DHANAURA"
+      ]
+    },
+    "3002": {
+      "description": "WIPL BIJNOR",
+      "company_code": "3000",
+      "aliases": [
+        "WIPL BIJNOR"
+      ]
+    },
+    "3003": {
+      "description": "WIPL BULANDSHAHR",
+      "company_code": "3000",
+      "aliases": [
+        "WIPL BULANDSHAHR"
+      ]
+    },
+    "3004": {
+      "description": "WIPL SAHRANPUR",
+      "company_code": "3000",
+      "aliases": [
+        "WIPL SAHRANPUR"
+      ]
+    },
+    "3005": {
+      "description": "WIPL AMROHA",
+      "company_code": "3000",
+      "aliases": [
+        "WIPL AMROHA"
+      ]
+    },
+    "3011": {
+      "description": "WIPL DHANAURA STEEL",
+      "company_code": "3000",
+      "aliases": [
+        "WIPL DHANAURA STEEL"
+      ]
+    },
+    "3021": {
+      "description": "WIPL DHANAURA",
+      "company_code": "3000",
+      "aliases": [
+        "WIPL DHANAURA"
+      ]
+    },
+    "3031": {
+      "description": "WIPL DHANAURA POWER",
+      "company_code": "3000",
+      "aliases": [
+        "WIPL DHANAURA POWER"
+      ]
+    },
+    "3041": {
+      "description": "WIPL DHANAURA AGRO",
+      "company_code": "3000",
+      "aliases": [
+        "WIPL DHANAURA AGRO"
+      ]
+    },
+    "3100": {
+      "description": "WIGVL NOIDA HO",
+      "company_code": "3100",
+      "aliases": [
+        "WIGVL NOIDA HO"
+      ]
+    },
+    "3101": {
+      "description": "WIGVL DHANAURA CNG",
+      "company_code": "3100",
+      "aliases": [
+        "WIGVL DHANAURA CNG"
+      ]
+    },
+    "3200": {
+      "description": "WAPL NOIDA HO",
+      "company_code": "3200",
+      "aliases": [
+        "WAPL NOIDA HO"
+      ]
+    },
+    "3201": {
+      "description": "WAPL DHANAURA AGRO",
+      "company_code": "3200",
+      "aliases": [
+        "WAPL DHANAURA AGRO"
+      ]
+    },
+    "3300": {
+      "description": "WIVPL NOIDA HO",
+      "company_code": "3300",
+      "aliases": [
+        "WIVPL NOIDA HO"
+      ]
+    },
+    "3301": {
+      "description": "WIVPL BIJNOR",
+      "company_code": "3300",
+      "aliases": [
+        "WIVPL BIJNOR"
+      ]
+    },
+    "5000": {
+      "description": "CORPORATE OFFICE",
+      "company_code": "5000",
+      "aliases": [
+        "CORPORATE OFFICE"
+      ]
+    },
+    "5001": {
+      "description": "MOHALI",
+      "company_code": "5000",
+      "aliases": [
+        "MOHALI"
+      ]
+    },
+    "5002": {
+      "description": "NH 24",
+      "company_code": "5000",
+      "aliases": [
+        "NH 24"
+      ]
+    },
+    "5003": {
+      "description": "SECTOR 32",
+      "company_code": "5000",
+      "aliases": [
+        "SECTOR 32"
+      ]
+    },
+    "6000": {
+      "description": "CORPORATE OFFICE",
+      "company_code": "6000",
+      "aliases": [
+        "CORPORATE OFFICE"
+      ]
+    },
+    "6001": {
+      "description": "SECTOR 18",
+      "company_code": "6000",
+      "aliases": [
+        "SECTOR 18"
+      ]
+    },
+    "6002": {
+      "description": "SECTOR 99",
+      "company_code": "6000",
+      "aliases": [
+        "SECTOR 99"
+      ]
+    },
+    "6003": {
+      "description": "NH 24",
+      "company_code": "6000",
+      "aliases": [
+        "NH 24"
+      ]
+    },
+    "6004": {
+      "description": "SECTOR 32",
+      "company_code": "6000",
+      "aliases": [
+        "SECTOR 32"
+      ]
+    },
+    "6005": {
+      "description": "BIJNOR",
+      "company_code": "6000",
+      "aliases": [
+        "BIJNOR"
+      ]
+    },
+    "7000": {
+      "description": "CORPORATE OFFICE",
+      "company_code": "7000",
+      "aliases": [
+        "CORPORATE OFFICE"
+      ]
+    },
+    "7001": {
+      "description": "",
+      "company_code": "7000",
+      "aliases": []
+    },
+    "1200": {
+      "description": "",
+      "company_code": "1200",
+      "aliases": []
+    },
+    "1201": {
+      "description": "",
+      "company_code": "1200",
+      "aliases": []
+    },
+    "1400": {
+      "description": "",
+      "company_code": "1400",
+      "aliases": []
+    },
+    "1401": {
+      "description": "",
+      "company_code": "1400",
+      "aliases": []
+    }
+  }
+}

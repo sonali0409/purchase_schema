@@ -1,0 +1,540 @@
+{
+  "source": "purchase_report (2).csv",
+  "description": "SAP purchasing-group master mapping. Human-readable Purgroup_Description values resolve to Purchasing_Group codes when the mapping is unique.",
+  "by_description": {
+    "Admin": [
+      "C30"
+    ],
+    "Admin-Wave City": [
+      "C54"
+    ],
+    "Administration": [
+      "S01"
+    ],
+    "Anil Kumar Singh": [
+      "C46"
+    ],
+    "Arun Kumar (A/c)": [
+      "C51"
+    ],
+    "Arun Singh": [
+      "C45"
+    ],
+    "Associate": [
+      "S23"
+    ],
+    "Business Develop": [
+      "S02"
+    ],
+    "Cane": [
+      "S30"
+    ],
+    "CCPL Store Mohali": [
+      "L18"
+    ],
+    "Chairman's Office": [
+      "S11"
+    ],
+    "Commercial": [
+      "S20"
+    ],
+    "Country Col.-Admin": [
+      "L10"
+    ],
+    "Country Col.-Mktg.": [
+      "C39"
+    ],
+    "CRM": [
+      "S03"
+    ],
+    "Director Office": [
+      "C50"
+    ],
+    "Display material": [
+      "C26"
+    ],
+    "Einkäufer 1": [
+      "001"
+    ],
+    "Ekta Sharma": [
+      "C44"
+    ],
+    "Engineering": [
+      "S27"
+    ],
+    "F & A": [
+      "C52"
+    ],
+    "Façade Material": [
+      "C04"
+    ],
+    "Finance & Accounts": [
+      "S16"
+    ],
+    "Fuel & Lubricants": [
+      "C07"
+    ],
+    "Furnace": [
+      "S31"
+    ],
+    "Furniture/Fixture": [
+      "C03"
+    ],
+    "Himanshu Gaur": [
+      "C56"
+    ],
+    "Horticulture": [
+      "C16",
+      "S08"
+    ],
+    "House Keeping": [
+      "C13"
+    ],
+    "HR": [
+      "C28"
+    ],
+    "Human Resources": [
+      "S06"
+    ],
+    "Import Procurement": [
+      "C21"
+    ],
+    "Information Techno": [
+      "S17"
+    ],
+    "Infra13-Materials": [
+      "L01"
+    ],
+    "Interior & Finish.": [
+      "C02"
+    ],
+    "Internal Audit": [
+      "S24"
+    ],
+    "IT Accessories": [
+      "C10"
+    ],
+    "IT Assets": [
+      "C09"
+    ],
+    "IT Lease Lines": [
+      "C12"
+    ],
+    "IT Spares": [
+      "C11"
+    ],
+    "Kapil Kapoor": [
+      "C55"
+    ],
+    "Land": [
+      "L13"
+    ],
+    "Legal": [
+      "S09"
+    ],
+    "Legal Services": [
+      "C31"
+    ],
+    "Maint. Services": [
+      "C24"
+    ],
+    "Manufacturing": [
+      "S28"
+    ],
+    "MD Office": [
+      "S12"
+    ],
+    "MEP": [
+      "C27"
+    ],
+    "Mr. Rajesh Bhagat": [
+      "L17"
+    ],
+    "Mr. Rajnish Agarwa": [
+      "L16"
+    ],
+    "Naval Guleria": [
+      "C40"
+    ],
+    "Naveen Arora": [
+      "C48"
+    ],
+    "Office Equipment": [
+      "C15"
+    ],
+    "Office Stationery": [
+      "C14"
+    ],
+    "Pantry Services": [
+      "C17"
+    ],
+    "Porta Cabin/cont.": [
+      "C06"
+    ],
+    "Printing Material": [
+      "C25"
+    ],
+    "Project Procure.": [
+      "C01"
+    ],
+    "Projects": [
+      "C29"
+    ],
+    "Purchase": [
+      "C53"
+    ],
+    "Safety & Security": [
+      "C23"
+    ],
+    "Sales": [
+      "S21"
+    ],
+    "Secretarial": [
+      "S22"
+    ],
+    "Security": [
+      "S10"
+    ],
+    "Spare Parts": [
+      "C22"
+    ],
+    "Steel & Cement": [
+      "C18"
+    ],
+    "Suncity-Admin": [
+      "L08"
+    ],
+    "Suncity-Mktg.": [
+      "C33"
+    ],
+    "Sunil Kumar": [
+      "C47"
+    ],
+    "Tendering Document": [
+      "C20"
+    ],
+    "Tools & Equipments": [
+      "C05"
+    ],
+    "Uppal Chadha-Admin": [
+      "L06"
+    ],
+    "Uppal Chadha-Mat.": [
+      "L04"
+    ],
+    "Uppal Chadha-Mktg.": [
+      "C32"
+    ],
+    "Uppal Chadha-Ser.": [
+      "L05"
+    ],
+    "Varun Mehra": [
+      "C43"
+    ],
+    "Vehicle": [
+      "C08"
+    ],
+    "Vineet Kumar": [
+      "C49"
+    ],
+    "Virendra P.Singh": [
+      "C41"
+    ],
+    "Wave Corpt.-Mkrg.": [
+      "C38"
+    ],
+    "Wave Mega -Admin": [
+      "L09"
+    ],
+    "Wave Mega-Mktg.": [
+      "C34"
+    ],
+    "Wave One-Admin": [
+      "L11"
+    ],
+    "Wave One-Mktg.": [
+      "C35"
+    ],
+    "Wave Sports-Mktg.": [
+      "C37"
+    ],
+    "WCC-25a Store Noid": [
+      "L15"
+    ],
+    "WCC-32 Store Noida": [
+      "L14"
+    ]
+  },
+  "by_code": {
+    "001": [
+      "Einkäufer 1"
+    ],
+    "C01": [
+      "Project Procure."
+    ],
+    "C02": [
+      "Interior & Finish."
+    ],
+    "C03": [
+      "Furniture/Fixture"
+    ],
+    "C04": [
+      "Façade Material"
+    ],
+    "C05": [
+      "Tools & Equipments"
+    ],
+    "C06": [
+      "Porta Cabin/cont."
+    ],
+    "C07": [
+      "Fuel & Lubricants"
+    ],
+    "C08": [
+      "Vehicle"
+    ],
+    "C09": [
+      "IT Assets"
+    ],
+    "C10": [
+      "IT Accessories"
+    ],
+    "C11": [
+      "IT Spares"
+    ],
+    "C12": [
+      "IT Lease Lines"
+    ],
+    "C13": [
+      "House Keeping"
+    ],
+    "C14": [
+      "Office Stationery"
+    ],
+    "C15": [
+      "Office Equipment"
+    ],
+    "C16": [
+      "Horticulture"
+    ],
+    "C17": [
+      "Pantry Services"
+    ],
+    "C18": [
+      "Steel & Cement"
+    ],
+    "C20": [
+      "Tendering Document"
+    ],
+    "C21": [
+      "Import Procurement"
+    ],
+    "C22": [
+      "Spare Parts"
+    ],
+    "C23": [
+      "Safety & Security"
+    ],
+    "C24": [
+      "Maint. Services"
+    ],
+    "C25": [
+      "Printing Material"
+    ],
+    "C26": [
+      "Display material"
+    ],
+    "C27": [
+      "MEP"
+    ],
+    "C28": [
+      "HR"
+    ],
+    "C29": [
+      "Projects"
+    ],
+    "C30": [
+      "Admin"
+    ],
+    "C31": [
+      "Legal Services"
+    ],
+    "C32": [
+      "Uppal Chadha-Mktg."
+    ],
+    "C33": [
+      "Suncity-Mktg."
+    ],
+    "C34": [
+      "Wave Mega-Mktg."
+    ],
+    "C35": [
+      "Wave One-Mktg."
+    ],
+    "C37": [
+      "Wave Sports-Mktg."
+    ],
+    "C38": [
+      "Wave Corpt.-Mkrg."
+    ],
+    "C39": [
+      "Country Col.-Mktg."
+    ],
+    "C40": [
+      "Naval Guleria"
+    ],
+    "C41": [
+      "Virendra P.Singh"
+    ],
+    "C43": [
+      "Varun Mehra"
+    ],
+    "C44": [
+      "Ekta Sharma"
+    ],
+    "C45": [
+      "Arun Singh"
+    ],
+    "C46": [
+      "Anil Kumar Singh"
+    ],
+    "C47": [
+      "Sunil Kumar"
+    ],
+    "C48": [
+      "Naveen Arora"
+    ],
+    "C49": [
+      "Vineet Kumar"
+    ],
+    "C50": [
+      "Director Office"
+    ],
+    "C51": [
+      "Arun Kumar (A/c)"
+    ],
+    "C52": [
+      "F & A"
+    ],
+    "C53": [
+      "Purchase"
+    ],
+    "C54": [
+      "Admin-Wave City"
+    ],
+    "C55": [
+      "Kapil Kapoor"
+    ],
+    "C56": [
+      "Himanshu Gaur"
+    ],
+    "L01": [
+      "Infra13-Materials"
+    ],
+    "L04": [
+      "Uppal Chadha-Mat."
+    ],
+    "L05": [
+      "Uppal Chadha-Ser."
+    ],
+    "L06": [
+      "Uppal Chadha-Admin"
+    ],
+    "L08": [
+      "Suncity-Admin"
+    ],
+    "L09": [
+      "Wave Mega -Admin"
+    ],
+    "L10": [
+      "Country Col.-Admin"
+    ],
+    "L11": [
+      "Wave One-Admin"
+    ],
+    "L13": [
+      "Land"
+    ],
+    "L14": [
+      "WCC-32 Store Noida"
+    ],
+    "L15": [
+      "WCC-25a Store Noid"
+    ],
+    "L16": [
+      "Mr. Rajnish Agarwa"
+    ],
+    "L17": [
+      "Mr. Rajesh Bhagat"
+    ],
+    "L18": [
+      "CCPL Store Mohali"
+    ],
+    "S01": [
+      "Administration"
+    ],
+    "S02": [
+      "Business Develop"
+    ],
+    "S03": [
+      "CRM"
+    ],
+    "S06": [
+      "Human Resources"
+    ],
+    "S08": [
+      "Horticulture"
+    ],
+    "S09": [
+      "Legal"
+    ],
+    "S10": [
+      "Security"
+    ],
+    "S11": [
+      "Chairman's Office"
+    ],
+    "S12": [
+      "MD Office"
+    ],
+    "S16": [
+      "Finance & Accounts"
+    ],
+    "S17": [
+      "Information Techno"
+    ],
+    "S20": [
+      "Commercial"
+    ],
+    "S21": [
+      "Sales"
+    ],
+    "S22": [
+      "Secretarial"
+    ],
+    "S23": [
+      "Associate"
+    ],
+    "S24": [
+      "Internal Audit"
+    ],
+    "S27": [
+      "Engineering"
+    ],
+    "S28": [
+      "Manufacturing"
+    ],
+    "S30": [
+      "Cane"
+    ],
+    "S31": [
+      "Furnace"
+    ]
+  },
+  "ambiguous_descriptions": {
+    "Horticulture": [
+      "C16",
+      "S08"
+    ]
+  }
+}
