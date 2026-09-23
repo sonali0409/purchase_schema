@@ -2,11 +2,14 @@
 # Uses only rows already returned by Purchase; no SQL or LLM calls.
 from __future__ import annotations
 import html,json,os,re,uuid
+from dotenv import load_dotenv
 from datetime import datetime,timezone
 from typing import Any,Dict,List,Optional,Tuple
 from urllib.parse import urlparse
 import ibm_boto3
 from ibm_botocore.client import Config
+
+load_dotenv()
 
 GRAPH_ENABLED=os.getenv('GRAPH_ENABLED','true').lower()=='true'
 COS_API_KEY_ID=os.getenv('COS_API_KEY_ID','').strip()
@@ -34,7 +37,7 @@ DIMENSION_ALIASES={
  'status':('Status','PO_Status','PR_Status','Release_Status'),
  'requisitioner':('Requisitioner','Requisitioner_Name','PR_Created_By','Created_By')}
 DIMENSION_LABELS={'vendor':'Vendor','supplier':'Supplier','plant':'Plant','department':'Department','company':'Company','material':'Material','status':'Status','requisitioner':'Requisitioner'}
-METRIC_LABELS={'distinct_count':'PO Count','count':'Count','po_count':'PO Count','pr_count':'PR Count','total':'Total','total_value':'Total Value','pr_value':'PR Value'}
+METRIC_LABELS={'distinct_count':'PO Count','count':'Count','record_count':'Count','po_count':'PO Count','pr_count':'PR Count','total':'Total','total_value':'Total Value','pr_value':'PR Value','value':'Value','amount':'Amount','quantity':'Quantity'}
 GENERIC_DIMENSION_ALIASES=('group_value_1','group_value','group_value_2','group_value_3','dimension','dimension_value','category')
 
 def _normalise(v:Any)->str:return re.sub(r'[^a-z0-9]+','_',str(v).strip().lower()).strip('_')
@@ -69,21 +72,26 @@ def _graph_required(question:str,intent:Any)->bool:
  return bool(getattr(intent,'group_by_column',None) or getattr(intent,'time_grain',None) or getattr(intent,'operation',None) in {'group_by_count','trend'})
 
 def _business_dimension_label(group_by:Any,fallback:str)->str:
- if group_by:
-  k=_normalise(group_by)
-  return DIMENSION_LABELS.get(k,str(group_by).replace('_',' ').title())
- k=_normalise(fallback)
+ k=_normalise(group_by) if group_by else _normalise(fallback)
+ direct={'vendor':'Vendor','vendor_name':'Vendor','supplier':'Supplier','supplier_name':'Supplier','plant':'Plant','plant_name':'Plant','department':'Department','department_name':'Department','company':'Company','company_name':'Company','material':'Material','material_desc':'Material','status':'Status','status_name':'Status','requisitioner':'Requisitioner','requisitioner_name':'Requisitioner'}
+ if k in direct:return direct[k]
  for ak,cands in DIMENSION_ALIASES.items():
   if k in {_normalise(x) for x in cands}:return DIMENSION_LABELS[ak]
  return fallback.replace('_',' ').title()
-def _business_metric_label(metric:str,intent:Any)->str:
- n=_normalise(metric)
+
+def _business_metric_label(metric:str,intent:Any,question:str="")->str:
+ n=_normalise(metric); op=getattr(intent,'operation',None); distinct_key=_normalise(getattr(intent,'distinct_key',None) or '')
+ if n in {'record_count','count','distinct_count','count_distinct','po_count','pr_count'}:
+  if 'pr' in distinct_key or 'purchase_requisition' in distinct_key:return 'PR Count'
+  if 'po' in distinct_key or 'purchase_order' in distinct_key:return 'PO Count'
+  if n=='po_count':return 'PO Count'
+  if n=='pr_count':return 'PR Count'
+  q=_normalise(question)
+  if 'po' in q and 'count' in q:return 'PO Count'
+  if 'pr' in q and 'count' in q:return 'PR Count'
+  if op=='count_distinct':return 'Distinct Count'
+  return 'Count'
  if n in METRIC_LABELS:return METRIC_LABELS[n]
- if getattr(intent,'operation',None)=='count_distinct' and 'count' in n:
-  k=_normalise(getattr(intent,'distinct_key',None) or '')
-  if 'po' in k or 'purchase_order' in k:return 'PO Count'
-  if 'pr' in k or 'purchase_requisition' in k:return 'PR Count'
-  return 'Distinct Count'
  return metric.replace('_',' ').title()
 
 def _dimension(columns:List[str],rows:List[Dict[str,Any]],question:str,intent:Any)->Optional[str]:
@@ -286,41 +294,41 @@ def _build_html(*,title:str,period:str,dimension:str,metrics:List[str],selected_
  else:selector=f'<div class="metric-display"><div class="metric-display-label">Metric</div><div class="metric-display-value">{smh}</div></div>'
  return f'''<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{th}</title><script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script><style>
 *{{box-sizing:border-box}}body{{margin:0;font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f5f7fb;color:#172033}}
-.page{{max-width:1500px;margin:0 auto;padding:28px}}
-.header{{background:linear-gradient(135deg,#0b3fa8,#1669d8 55%,#2f9bff);color:white;border-radius:20px;padding:26px 32px;box-shadow:0 14px 35px rgba(19,71,145,.2);display:flex;justify-content:space-between;align-items:center;gap:20px;flex-wrap:wrap}}
+.page{{max-width:1540px;margin:0 auto;padding:16px 34px 22px}}
+.header{{background:linear-gradient(112deg,#0b2f73 0%,#1459bd 55%,#2c76dc 100%);color:white;border-radius:19px;padding:25px 30px;box-shadow:0 14px 35px rgba(19,71,145,.2);display:flex;justify-content:space-between;align-items:center;gap:20px;flex-wrap:wrap}}
 .header-left{{display:flex;align-items:center;gap:16px;min-width:0}}
 .header-icon{{flex:0 0 auto;width:48px;height:48px;border-radius:14px;background:rgba(255,255,255,.16);border:1px solid rgba(255,255,255,.28);display:flex;align-items:center;justify-content:center}}
 .header-icon svg{{width:24px;height:24px}}
 .eyebrow{{font-size:12px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;opacity:.82;margin-bottom:4px}}
-h1{{margin:0;font-size:26px;line-height:1.25;font-weight:750;overflow-wrap:anywhere}}
+h1{{margin:0;font-size:27px;line-height:1.25;font-weight:750;overflow-wrap:anywhere}}
 .header-right{{display:flex;align-items:center;gap:12px;flex-wrap:wrap}}
 .period-badge{{min-width:170px;background:rgba(255,255,255,.14);border:1px solid rgba(255,255,255,.25);padding:11px 16px;border-radius:14px;backdrop-filter:blur(8px);display:flex;gap:10px;align-items:center}}
 .period-badge svg{{width:18px;height:18px;flex:0 0 auto;opacity:.9}}
 .period-badge-label{{font-size:11px;font-weight:700;text-transform:uppercase;opacity:.8;margin-bottom:3px}}
 .period-badge-value{{font-size:13px;font-weight:650}}
-.metric-selector,.metric-display{{min-width:190px;background:rgba(255,255,255,.16);border:1px solid rgba(255,255,255,.28);padding:11px 16px;border-radius:14px;backdrop-filter:blur(8px)}}
-.metric-selector label,.metric-display-label{{display:block;font-size:11px;font-weight:700;text-transform:uppercase;opacity:.8;margin-bottom:6px}}
-.metric-selector select{{width:100%;border:0;outline:0;padding:8px 10px;border-radius:9px;font-size:14px;font-weight:650;background:white;color:#12305e}}
+.metric-selector,.metric-display,.topn-selector{{min-width:170px;background:rgba(255,255,255,.16);border:1px solid rgba(255,255,255,.28);padding:11px 16px;border-radius:14px;backdrop-filter:blur(8px)}}
+.metric-selector label,.metric-display-label,.topn-selector label{{display:block;font-size:11px;font-weight:700;text-transform:uppercase;opacity:.8;margin-bottom:6px}}
+.metric-selector select,.topn-selector select{{width:100%;border:0;outline:0;padding:8px 10px;border-radius:9px;font-size:14px;font-weight:650;background:white;color:#12305e}}
 .metric-display-value{{font-size:14px;font-weight:700}}
-.cards{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:18px;margin-top:20px}}
-.card{{background:white;border:1px solid #e7ebf2;border-radius:17px;padding:19px 21px;box-shadow:0 8px 25px rgba(24,45,80,.06);display:flex;align-items:center;gap:15px}}
+.cards{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:18px;margin-top:19px}}
+.card{{background:white;border:1px solid #e4e9f1;border-radius:16px;padding:19px 21px;box-shadow:0 8px 25px rgba(24,45,80,.06);display:flex;align-items:center;gap:15px}}
 .card-icon{{flex:0 0 auto;width:44px;height:44px;border-radius:13px;display:flex;align-items:center;justify-content:center}}
 .card-icon svg{{width:21px;height:21px}}
 .card-icon.blue{{background:#e7f0ff;color:#1a63d6}}
 .card-icon.green{{background:#e5f8ee;color:#189a5a}}
 .card-icon.purple{{background:#f2ebff;color:#7b3fe4}}
 .card-body{{min-width:0}}
-.card-label{{color:#707b8e;font-size:12.5px;font-weight:650;margin-bottom:5px}}
-.card-value{{color:#182235;font-size:23px;font-weight:760;overflow-wrap:anywhere;line-height:1.2}}
-.content{{display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:20px;margin-top:20px}}
+.card-label{{color:#1760d2;font-size:12px;font-weight:700;margin-bottom:5px}}
+.card-value{{color:#172033;font-size:25px;font-weight:790;overflow-wrap:anywhere;line-height:1.2}}
+.content{{display:grid;grid-template-columns:minmax(0,1fr) 390px;gap:20px;margin-top:20px}}
 .chart-card,.insight{{background:white;border:1px solid #e7ebf2;border-radius:18px;padding:22px;box-shadow:0 8px 25px rgba(24,45,80,.06)}}
-.chart-card{{min-height:560px}}
+.chart-card{{min-height:535px}}
 .chart-header{{display:flex;justify-content:space-between;align-items:center;gap:20px;margin-bottom:10px}}
 .chart-title{{font-size:18px;font-weight:750}}
 .chart-subtitle{{color:#7a8495;font-size:12.5px;margin-top:4px}}
 .toggle{{display:flex;background:#f0f3f8;padding:4px;border-radius:999px}}
 .toggle button{{border:0;background:transparent;border-radius:999px;padding:7px 15px;font-size:12px;font-weight:700;cursor:pointer;color:#647087}}
-.toggle button.active{{background:#1a63d6;color:white;box-shadow:0 2px 7px rgba(26,99,214,.35)}}
+.toggle button.active{{background:#2467dc;color:white;box-shadow:0 2px 7px rgba(26,99,214,.35)}}
 #chart{{width:100%;height:450px}}
 .insight{{height:fit-content}}
 .insight-title{{font-size:17px;font-weight:750;margin-bottom:16px;display:flex;align-items:center;gap:9px}}
@@ -344,12 +352,12 @@ h1{{margin:0;font-size:26px;line-height:1.25;font-weight:750;overflow-wrap:anywh
 </style></head><body><div class="page">
 <section class="header">
 <div class="header-left"><div class="header-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg></div><div><div class="eyebrow">Purchase Analytics</div><h1>{th}</h1></div></div>
-<div class="header-right"><div class="period-badge"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg><div><div class="period-badge-label">Period</div><div class="period-badge-value">{ph}</div></div></div>{selector}</div>
+<div class="header-right"><div class="period-badge"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg><div><div class="period-badge-label">Period</div><div class="period-badge-value">{ph}</div></div></div>{selector}<div class="topn-selector"><label>Show</label><select id="topNSelect" onchange="changeTopN(this.value)"><option value="5" selected>Top 5</option><option value="10">Top 10</option><option value="20">Top 20</option><option value="50">Top 50</option><option value="all">All</option></select></div></div>
 </section>
 <section class="cards">
 <div class="card"><div class="card-icon blue"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg></div><div class="card-body"><div class="card-label" id="totalLabel">Total {smh}</div><div class="card-value" id="totalValue">{total:,.2f}</div></div></div>
 <div class="card"><div class="card-icon green"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 21h8"/><path d="M12 17v4"/><path d="M7 4h10v4a5 5 0 0 1-10 0V4z"/><path d="M7 6H4a3 3 0 0 0 3 4"/><path d="M17 6h3a3 3 0 0 1-3 4"/></svg></div><div class="card-body"><div class="card-label">Highest {dh}</div><div class="card-value" id="highestValue">{hih}</div></div></div>
-<div class="card"><div class="card-icon purple"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg></div><div class="card-body"><div class="card-label">Categories</div><div class="card-value" id="categoryCount">{len(initial)}</div></div></div>
+<div class="card"><div class="card-icon purple"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg></div><div class="card-body"><div class="card-label">Average {smh} by {dh}</div><div class="card-value" id="avgValue">{avgv}</div><div class="card-sub" id="avgSub">Across {len(initial)} values</div></div></div>
 </section>
 <section class="content">
 <div class="chart-card"><div class="chart-header"><div><div class="chart-title" id="chartTitle">{smh} by {dh}</div><div class="chart-subtitle">Values are based on the Purchase data returned for this request.</div></div><div class="toggle"><button id="barBtn" class="active" onclick="renderChart('bar')">Bar</button><button id="lineBtn" onclick="renderChart('line')">Line</button></div></div><div id="chart"></div></div>
@@ -367,12 +375,14 @@ h1{{margin:0;font-size:26px;line-height:1.25;font-weight:750;overflow-wrap:anywh
 <div class="footer">Generated {gen}</div>
 </div><script>
 const metrics={sj};const metricData={dj};const dimensionName={json.dumps(dimension)};let currentMetric={json.dumps(selected_metric)};let currentChartType={json.dumps(chart_type)};
-const chartPalette=['#1a63d6','#22c55e','#f5a623','#ec4899','#7b3fe4','#06b6d4','#f97316','#14b8a6','#e11d48','#6366f1'];
+const chartPalette=['#2563D9','#21B9D5','#8B4DE8','#E83D9B','#19A963','#F3A51B','#EF5B4D','#11A9A0','#6366F1','#F07A24'];let topN=5;
 function fmt(n){{return n.toLocaleString(undefined,{{minimumFractionDigits:2,maximumFractionDigits:2}})}}
-function updateSummary(metric){{const rows=metricData[metric]||[];const total=rows.reduce((s,x)=>s+x.value,0);const hi=rows.length?rows.reduce((a,x)=>x.value>a.value?x:a,rows[0]):null;const lo=rows.length?rows.reduce((a,x)=>x.value<a.value?x:a,rows[0]):null;const avg=rows.length?total/rows.length:0;
+function getDisplayedRows(metric){{const rows=[...(metricData[metric]||[])].sort((a,b)=>b.value-a.value);return topN==='all'?rows:rows.slice(0,Number(topN));}}
+function updateSummary(metric){{const rows=metricData[metric]||[];const displayed=getDisplayedRows(metric);const total=rows.reduce((s,x)=>s+x.value,0);const hi=displayed.length?displayed[0]:null;const lo=displayed.length?displayed[displayed.length-1]:null;const displayedTotal=displayed.reduce((s,x)=>s+x.value,0);const avg=displayed.length?displayedTotal/displayed.length:0;
 document.getElementById('totalLabel').textContent='Total '+metric;
 document.getElementById('totalValue').textContent=fmt(total);
-document.getElementById('categoryCount').textContent=rows.length;
+document.getElementById('avgValue').textContent=fmt(avg);
+document.getElementById('avgSub').textContent=(topN==='all'?'Across all '+rows.length:'Across top '+displayed.length)+' '+dimensionName+' values';
 document.getElementById('highestValue').textContent=hi?hi.category:'—';
 document.getElementById('chartTitle').textContent=metric+' by '+dimensionName;
 document.getElementById('insightHighest').textContent=hi?hi.category:'—';
@@ -381,10 +391,11 @@ document.getElementById('insightHighValue').textContent=hi?fmt(hi.value):'—';
 document.getElementById('insightLowValue').textContent=lo?fmt(lo.value):'—';
 document.getElementById('insightAvgValue').textContent=fmt(avg);
 document.getElementById('insightHeadline').textContent=(hi&&lo)?(hi.category+' recorded the highest '+metric+' at '+fmt(hi.value)+', while '+lo.category+' was the lowest at '+fmt(lo.value)+'.'):'No chartable business values were returned for this request.';
-document.getElementById('insightText').textContent=!rows.length?'No chartable business values were returned for this metric.':hi.category+' has the highest '+metric+' at '+fmt(hi.value)+'. The lowest is '+lo.category+' at '+fmt(lo.value)+'. Total across the displayed '+dimensionName+' breakdown is '+fmt(total)+'.';
+document.getElementById('insightText').textContent=!displayed.length?'No chartable business values were returned for this metric.':hi.category+' has the highest '+metric+' at '+fmt(hi.value)+'. The lowest displayed value is '+lo.category+' at '+fmt(lo.value)+'. The selected view contains '+displayed.length+' '+dimensionName+' values. Overall total across all returned data is '+fmt(total)+'.';
 }}
-function changeMetric(metric){{currentMetric=metric;updateSummary(metric);renderChart(currentChartType,false)}}
-function renderChart(type){{currentChartType=type;const rows=metricData[currentMetric]||[];const colors=type==='line'?chartPalette[0]:rows.map((_,i)=>chartPalette[i%chartPalette.length]);const trace={{x:rows.map(x=>x.category),y:rows.map(x=>x.value),type:type==='line'?'scatter':'bar',mode:type==='line'?'lines+markers':undefined,marker:{{color:colors,line:type==='line'?undefined:{{width:0}}}},line:type==='line'?{{color:chartPalette[0],width:3}}:undefined,hovertemplate:'%{{x}}<br>'+currentMetric+': %{{y:,.2f}}<extra></extra>'}};const layout={{margin:{{l:65,r:20,t:15,b:110}},paper_bgcolor:'white',plot_bgcolor:'white',font:{{family:'Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif'}},xaxis:{{title:dimensionName,tickangle:-35,automargin:true,gridcolor:'#edf0f5'}},yaxis:{{title:currentMetric,automargin:true,gridcolor:'#edf0f5',zeroline:true}},hoverlabel:{{bgcolor:'white',font:{{color:'#172033'}}}},showlegend:false}};Plotly.newPlot('chart',[trace],layout,{{responsive:true,displayModeBar:false}});document.getElementById('barBtn').classList.toggle('active',type==='bar');document.getElementById('lineBtn').classList.toggle('active',type==='line')}}
+function changeMetric(metric){{currentMetric=metric;updateSummary(metric);renderChart(currentChartType)}}
+function changeTopN(value){{topN=value;updateSummary(currentMetric);renderChart(currentChartType)}}
+function renderChart(type){{currentChartType=type;const rows=getDisplayedRows(currentMetric);const colors=type==='line'?chartPalette[0]:rows.map((_,i)=>chartPalette[i%chartPalette.length]);const trace={{x:rows.map(x=>x.category),y:rows.map(x=>x.value),type:type==='line'?'scatter':'bar',mode:type==='line'?'lines+markers':undefined,marker:{{color:colors,line:type==='line'?undefined:{{width:0}}}},line:type==='line'?{{color:chartPalette[0],width:3}}:undefined,hovertemplate:'%{{x}}<br>'+currentMetric+': %{{y:,.2f}}<extra></extra>'}};const layout={{margin:{{l:65,r:20,t:15,b:110}},paper_bgcolor:'white',plot_bgcolor:'white',font:{{family:'Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif'}},xaxis:{{title:dimensionName,tickangle:-35,automargin:true,gridcolor:'#edf0f5'}},yaxis:{{title:currentMetric,automargin:true,gridcolor:'#edf0f5',zeroline:true}},hoverlabel:{{bgcolor:'white',font:{{color:'#172033'}}}},showlegend:false}};Plotly.newPlot('chart',[trace],layout,{{responsive:true,displayModeBar:false}});document.getElementById('barBtn').classList.toggle('active',type==='bar');document.getElementById('lineBtn').classList.toggle('active',type==='line')}}
 updateSummary(currentMetric);renderChart(currentChartType);
 </script></body></html>'''
 
@@ -412,7 +423,7 @@ def generate_dashboard(*,question:str,columns:List[str],rows:List[Dict[str,Any]]
  metrics=[m for m in metrics if m in metric_data]
  display_metric_data={};display_names=[];display_map={}
  for m in metrics:
-  label=_business_metric_label(m,intent)
+  label=_business_metric_label(m,intent,question)
   if label in display_metric_data:label=m
   display_map[m]=label;display_names.append(label);display_metric_data[label]=metric_data[m]
  selected_label=display_map[selected_metric]
